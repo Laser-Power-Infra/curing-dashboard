@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  background: #f8fafc;
+  color: #0f172a;
+  /* numbers line up in tables and KPI tiles (guide 8) */
+  font-variant-numeric: tabular-nums;
+}

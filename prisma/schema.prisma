@@ -1,0 +1,781 @@
+// =============================================================================
+// Curing Dashboard – Prisma schema
+// Laser Power & Infra · Kharagpur · Sioplas 3 & 4 curing
+//
+// Stack: Next.js (App Router) · Neon Postgres · Prisma 7 (driver adapter)
+// Guide: Curing_Dashboard_Build_Guide.md (sections 3 and 5)
+//
+// Conventions
+//  - No hard deletes. Rows are closed / deactivated with a status or `active` flag.
+//  - All times are stored as timestamptz (UTC) and shown in IST in the UI.
+//  - `createdBy` / `updatedBy` hold a user email or a job name (e.g. "job:W2").
+//  - Fields marked AUTO are written only by the rules engine / jobs.
+//    Fields marked MANUAL are written only by people and never overwritten by jobs.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// -----------------------------------------------------------------------------
+// Enums
+// -----------------------------------------------------------------------------
+
+enum Role {
+  MD
+  PRODUCTION_HEAD
+  CURING
+  LAB
+  BOILER
+  PLANNING
+  TRANSFER
+  ADMIN
+  VIEWER
+}
+
+/// Area of responsibility – who gets alerts for what (guide 3.7)
+enum ResponsibilityArea {
+  CURING_LOG
+  HOT_SET_TEST
+  BOILER_LOG
+  RECIPE_MASTER
+  PERSON_MASTER
+  PRODUCTION_HEAD
+  PRODUCT_MASTER
+  TRANSFER
+  MD
+}
+
+enum RecordSource {
+  SFG_SYNC // W1 drum sync from the SFG Dashboard
+  IMPORT // one-time import from Google Sheets
+  MANUAL // entered in this dashboard
+}
+
+enum UnloadTimeSource {
+  SFG
+  MANUAL
+  UNKNOWN // only the date is known – no 6-hour alerts (guide 4.2)
+}
+
+/// Pipeline status of a drum, latest curing cycle (guide 5.9)
+enum DrumStatus {
+  MADE
+  MISSING
+  IN_CURING
+  AWAITING_TEST
+  TEST_OVERDUE
+  FAILED
+  PASSED
+  REQUISITION_RAISED
+  SENT
+  DATA_ERROR
+  NOT_CURING_ITEM
+}
+
+/// Missing Drum Tracker status (guide 3.8)
+enum TrackerStatus {
+  MISSING
+  LATE
+  CURED
+  DATA_ERROR
+}
+
+enum DelayReason {
+  TANK_FULL
+  BOILER_DOWN
+  NO_MANPOWER
+  DRUM_ON_HOLD
+  OTHER
+}
+
+enum MatchMethod {
+  AUTO // matching rule 5.3
+  MANUAL // linked by a person
+}
+
+enum TimeCheck {
+  OK
+  UNDER_CURED
+  NO_RECIPE
+}
+
+enum VisualCheck {
+  OK
+  NOT_OK
+}
+
+enum TestResult {
+  PASS
+  FAIL
+}
+
+enum RecipeStatus {
+  DRAFT
+  APPROVED
+  RETIRED
+}
+
+enum CuringUnitType {
+  TANK
+  AUTOCLAVE
+}
+
+enum RequisitionStatus {
+  RAISED
+  DISPATCHED
+  RECEIVED
+  CANCELLED
+}
+
+enum AlertTrigger {
+  DRUM_NOT_IN_CURING
+  CURING_LOG_NOT_UPDATED
+  UNDER_CURED
+  TEST_OVERDUE
+  TEST_FAILED
+  PASSED_NO_REQUISITION
+  BOILER_READING_MISSED
+  NO_RECIPE
+  DAILY_MD_SUMMARY
+  JOB_FAILURE
+  FEED_STALE
+}
+
+/// What the escalation delay is counted from
+enum EscalationAnchor {
+  FROM_UNLOAD // drum unloaded_at
+  FROM_LAST_CURING_ENTRY // last Curing Log row on a running line
+  FROM_EVENT // the moment the condition was detected (under-cured, fail, pass)
+  FROM_TEST_DUE // curing end + wait before test
+  FROM_SHIFT_END // boiler shift end
+}
+
+enum EscalationObject {
+  DRUM
+  CURING_LOG
+  HOT_SET_TEST
+  BOILER_SHIFT
+  LINE
+}
+
+enum AlertStatus {
+  QUEUED
+  SENT
+  FAILED
+  SKIPPED // e.g. person has no WhatsApp number
+}
+
+enum WhatsAppRoute {
+  SHEET // Urgent WhatsApp Message sheet – Send Message tab
+  API // direct WhatsApp API
+}
+
+enum JobStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  CLOSE
+  REOPEN
+}
+
+enum AuditSource {
+  UI
+  JOB
+  IMPORT
+  API
+}
+
+// -----------------------------------------------------------------------------
+// People, users, responsibility
+// -----------------------------------------------------------------------------
+
+/// Login account (Google sign-in). If you use Auth.js with the Prisma adapter,
+/// add its Account / Session / VerificationToken models and link them here.
+model User {
+  id          String    @id @default(cuid())
+  email       String    @unique
+  name        String?
+  roles       Role[]
+  active      Boolean   @default(true)
+  lastLoginAt DateTime? @db.Timestamptz(3)
+
+  personId String? @unique
+  person   Person? @relation(fields: [personId], references: [id])
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@map("users")
+}
+
+/// Person Master – anyone who can receive alerts (may or may not log in)
+model Person {
+  id       String  @id @default(cuid())
+  name     String  @unique
+  role     String? // free text designation, e.g. "Production head"
+  whatsapp String? // E.164, e.g. +917001275745
+  email    String?
+  active   Boolean @default(true)
+
+  user             User?
+  responsibilities Responsibility[]
+  escalationRules  EscalationRule[] @relation("EscalationRecipients")
+  alerts           Alert[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  createdBy String?
+  updatedBy String?
+
+  @@map("persons")
+}
+
+model Responsibility {
+  id        String             @id @default(cuid())
+  area      ResponsibilityArea
+  personId  String
+  person    Person             @relation(fields: [personId], references: [id])
+  isPrimary Boolean            @default(true)
+  active    Boolean            @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([area, personId])
+  @@map("responsibilities")
+}
+
+// -----------------------------------------------------------------------------
+// Plant set-up
+// -----------------------------------------------------------------------------
+
+model Plant {
+  id     String  @id @default(cuid())
+  code   String  @unique // KGP, PPK
+  name   String
+  active Boolean @default(true)
+
+  lines Line[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@map("plants")
+}
+
+/// Production line. Only lines with inScope = true are checked by the rules.
+model Line {
+  id      String  @id @default(cuid())
+  code    String  @unique // SIOPLAS_3
+  name    String // "Sioplas 3"
+  erpCode String? // EX075 for Sioplas 4
+  plantId String
+  plant   Plant   @relation(fields: [plantId], references: [id])
+  inScope Boolean @default(false)
+  active  Boolean @default(true)
+
+  drums Drum[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@map("lines")
+}
+
+/// Shift definition – times are local IST "HH:mm". [CONFIG]
+model ShiftDef {
+  id        String  @id @default(cuid())
+  code      String  @unique // MORNING, AFTERNOON, NIGHT
+  name      String
+  startTime String // "06:00"
+  endTime   String // "14:00" – may be next day for the night shift
+  sortOrder Int
+  confirmed Boolean @default(false) // false until the plant confirms the timings
+  active    Boolean @default(true)
+
+  boilerReadings BoilerReading[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@map("shift_defs")
+}
+
+/// Curing tank / autoclave
+model CuringUnit {
+  id     String         @id @default(cuid())
+  code   String         @unique
+  name   String
+  type   CuringUnitType
+  active Boolean        @default(true)
+
+  curingLogs CuringLog[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@map("curing_units")
+}
+
+model Boiler {
+  id     String  @id @default(cuid())
+  code   String  @unique // UBL07
+  name   String // "Boiler 7"
+  active Boolean @default(true)
+
+  readings BoilerReading[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@map("boilers")
+}
+
+// -----------------------------------------------------------------------------
+// Masters
+// -----------------------------------------------------------------------------
+
+/// Product Master – core / conductor items
+model Product {
+  id           String  @id @default(cuid())
+  code         String? @unique // ERP SFG code when known
+  name         String  @unique // exactly as in the SFG Dashboard
+  sizeSqMm     Int?
+  voltageKv    Int?
+  isCuringItem Boolean @default(true) // false = excluded from all curing rules
+  active       Boolean @default(true)
+
+  recipes    CuringRecipe[]
+  drums      Drum[]
+  curingLogs CuringLog[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  createdBy String?
+  updatedBy String?
+
+  @@map("products")
+}
+
+/// Curing Recipe Master. Rules use only inUse = true AND status = APPROVED.
+model CuringRecipe {
+  id                String       @id @default(cuid())
+  compound          String // XLPE compound
+  productId         String
+  product           Product      @relation(fields: [productId], references: [id])
+  curingType        String // e.g. Tank / Autoclave / Steam
+  approvedCuringHrs Decimal      @db.Decimal(6, 2)
+  waitBeforeTestHrs Decimal      @db.Decimal(6, 2)
+  inUse             Boolean      @default(true)
+  status            RecipeStatus @default(DRAFT)
+  approvedBy        String?
+  approvedAt        DateTime?    @db.Timestamptz(3)
+  remarks           String?
+
+  curingLogs CuringLog[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  createdBy String?
+  updatedBy String?
+
+  @@index([compound, productId, curingType, status, inUse])
+  @@map("curing_recipes")
+}
+
+// -----------------------------------------------------------------------------
+// Core data
+// -----------------------------------------------------------------------------
+
+/// Drums made – one row per drum unloaded from a Sioplas line (guide 3.1)
+model Drum {
+  id               String           @id @default(cuid())
+  gridEntryId      String           @unique // key from the SFG Dashboard
+  lineId           String
+  line             Line             @relation(fields: [lineId], references: [id])
+  unloadDate       DateTime         @db.Date
+  unloadedAt       DateTime?        @db.Timestamptz(3) // date + time; null when time unknown
+  unloadTimeSource UnloadTimeSource @default(UNKNOWN)
+  prodOrders       String[] // one drum can carry several orders
+  mcNo             String?
+  party            String?
+  coreItem         String // as received from the source
+  productId        String?
+  product          Product?         @relation(fields: [productId], references: [id])
+  drumNo           String // physical drum – RE-USED, never unique
+  drumSize         String?
+  lengthM          Decimal          @db.Decimal(10, 2)
+  enteredBy        String?
+  stockStatus      String? // e.g. Consumed / In stock (from Drum Register)
+  isCuringItem     Boolean          @default(true)
+
+  status     DrumStatus   @default(MADE) // AUTO
+  dataFlags  String[] // AUTO: DUPLICATE_SAME_DAY, MISSING_PARTY, NOT_CURING_ITEM, ...
+  source     RecordSource
+  lastSyncAt DateTime?    @db.Timestamptz(3)
+
+  curingLogs  CuringLog[]
+  hotSetTests HotSetTest[]
+  tracker     MissingDrumTracker?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  createdBy String?
+  updatedBy String?
+
+  @@index([drumNo, unloadedAt])
+  @@index([drumNo, unloadDate])
+  @@index([lineId, unloadDate])
+  @@index([status])
+  @@map("drums")
+}
+
+/// Curing Log – one row per drum per curing cycle (guide 3.2)
+model CuringLog {
+  id      String  @id @default(cuid())
+  lotNo   String?
+  cycleNo Int     @default(1) // 1 = first curing, 2+ = re-cure
+
+  // Matching (rule 5.3). One curing row can belong to only one drum.
+  drumId      String?
+  drum        Drum?        @relation(fields: [drumId], references: [id])
+  matchMethod MatchMethod?
+  matchedAt   DateTime?    @db.Timestamptz(3)
+
+  coreProductionDate DateTime?   @db.Date
+  productId          String?
+  product            Product?    @relation(fields: [productId], references: [id])
+  productName        String? // as entered / imported
+  coreDrumNo         String
+  lengthM            Decimal?    @db.Decimal(10, 2)
+  xlpeCompound       String?
+  curingUnitId       String?
+  curingUnit         CuringUnit? @relation(fields: [curingUnitId], references: [id])
+  chamberTankText    String? // free text from the sheet import
+
+  curingStartAt DateTime  @db.Timestamptz(3)
+  curingEndAt   DateTime? @db.Timestamptz(3)
+
+  // AUTO – computed by the app on save, never typed by users
+  recipeId         String?
+  recipe           CuringRecipe? @relation(fields: [recipeId], references: [id])
+  plannedCuringHrs Decimal?      @db.Decimal(6, 2)
+  actualCuringHrs  Decimal?      @db.Decimal(6, 2)
+  hoursDeviation   Decimal?      @db.Decimal(6, 2)
+  timeCheck        TimeCheck?
+  testDueAt        DateTime?     @db.Timestamptz(3)
+  testResult       TestResult? // latest Hot Set Test result for this cycle
+  lotStatus        DrumStatus?
+
+  visualCheck VisualCheck?
+  visualNote  String?
+
+  // Transfer to Polypark
+  requisitionId String?
+  requisition   Requisition? @relation(fields: [requisitionId], references: [id])
+  sentDate      DateTime?    @db.Timestamptz(3)
+
+  remarks   String? // MANUAL
+  mdRemarks String? // MANUAL – MD only
+
+  hotSetTests HotSetTest[]
+  trackerRow  MissingDrumTracker?
+
+  source    RecordSource @default(MANUAL)
+  createdAt DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime     @updatedAt @db.Timestamptz(3)
+  createdBy String?
+  updatedBy String?
+
+  @@unique([drumId, cycleNo])
+  @@index([coreDrumNo, curingStartAt])
+  @@index([curingStartAt])
+  @@index([testDueAt])
+  @@index([lotStatus])
+  @@map("curing_logs")
+}
+
+/// Hot Set Test (guide 3.3). Result is entered by the lab – never recalculated (rule 5.6).
+model HotSetTest {
+  id              String     @id @default(cuid())
+  curingLogId     String
+  curingLog       CuringLog  @relation(fields: [curingLogId], references: [id])
+  drumId          String?
+  drum            Drum?      @relation(fields: [drumId], references: [id])
+  lotNo           String?
+  sampleEnd       String? // e.g. Inner / Outer end
+  testType        String?
+  readings        Json? // raw readings as entered
+  hotSetPct       Decimal?   @db.Decimal(6, 2) // reference only
+  permanentSetPct Decimal?   @db.Decimal(6, 2) // reference only
+  result          TestResult
+  testedAt        DateTime   @db.Timestamptz(3)
+  testedBy        String?
+  remarks         String?
+
+  source    RecordSource @default(MANUAL)
+  createdAt DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime     @updatedAt @db.Timestamptz(3)
+  createdBy String?
+  updatedBy String?
+
+  @@index([curingLogId, testedAt])
+  @@map("hot_set_tests")
+}
+
+/// Boiler Temp Log – one reading per boiler per shift per day (guide 3.4)
+model BoilerReading {
+  id           String   @id @default(cuid())
+  boilerId     String
+  boiler       Boiler   @relation(fields: [boilerId], references: [id])
+  date         DateTime @db.Date // production date (IST)
+  shiftId      String
+  shift        ShiftDef @relation(fields: [shiftId], references: [id])
+  temperatureC Decimal? @db.Decimal(6, 2)
+  pressureBar  Decimal? @db.Decimal(6, 2)
+  readings     Json? // any extra readings
+  recordedAt   DateTime @db.Timestamptz(3)
+  recordedBy   String?
+  remarks      String?
+
+  source    RecordSource @default(MANUAL)
+  createdAt DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime     @updatedAt @db.Timestamptz(3)
+
+  @@unique([boilerId, date, shiftId])
+  @@map("boiler_readings")
+}
+
+/// Missing Drum Tracker – permanent record, never deleted, only closed (guide 3.8).
+/// Grid entry ID, line, drum no, item, prod order, length and unloaded-at come from `drum`.
+/// Hours since unload is computed live in the UI.
+model MissingDrumTracker {
+  id      String @id @default(cuid())
+  trackNo Int    @unique @default(autoincrement()) // shown as MDT-0001
+
+  drumId String @unique
+  drum   Drum   @relation(fields: [drumId], references: [id])
+
+  // AUTO
+  status          TrackerStatus
+  curingLogId     String?       @unique
+  curingLog       CuringLog?    @relation(fields: [curingLogId], references: [id])
+  curingStartAt   DateTime?     @db.Timestamptz(3)
+  hoursLate       Decimal?      @db.Decimal(8, 2)
+  escalationLevel Int           @default(0)
+  lastAlertAt     DateTime?     @db.Timestamptz(3)
+  closedAt        DateTime?     @db.Timestamptz(3)
+  openedAt        DateTime      @default(now()) @db.Timestamptz(3)
+
+  // MANUAL – never written by jobs
+  reason          DelayReason?
+  remarks         String?
+  mdRemarks       String?
+  manualUpdatedBy String?
+  manualUpdatedAt DateTime?    @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([status, closedAt])
+  @@map("missing_drum_tracker")
+}
+
+/// Transfer requisition Kharagpur → Polypark (guide 3.11)
+model Requisition {
+  id           String            @id @default(cuid())
+  reqNo        String            @unique
+  status       RequisitionStatus @default(RAISED)
+  raisedAt     DateTime          @default(now()) @db.Timestamptz(3)
+  raisedBy     String?
+  dispatchedAt DateTime?         @db.Timestamptz(3)
+  receivedAt   DateTime?         @db.Timestamptz(3)
+  totalLengthM Decimal?          @db.Decimal(12, 2)
+  remarks      String?
+
+  curingLogs CuringLog[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  updatedBy String?
+
+  @@index([status])
+  @@map("requisitions")
+}
+
+// -----------------------------------------------------------------------------
+// Alerts and escalation
+// -----------------------------------------------------------------------------
+
+/// Escalation matrix (guide 9.1) – one row per trigger and level. [CONFIG]
+model EscalationRule {
+  id           String           @id @default(cuid())
+  trigger      AlertTrigger
+  level        Int
+  anchor       EscalationAnchor
+  delayMinutes Int // minutes after the anchor; 0 = immediately
+  description  String // plain text shown in Settings, e.g. "8 h → Mukesh"
+  recipients   Person[]         @relation("EscalationRecipients")
+  active       Boolean          @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  updatedBy String?
+
+  @@unique([trigger, level])
+  @@map("escalation_rules")
+}
+
+/// One row per (trigger, object, level). The unique key guarantees
+/// "one alert per drum per level only" (guide 9.2).
+model Escalation {
+  id         String           @id @default(cuid())
+  trigger    AlertTrigger
+  objectType EscalationObject
+  objectId   String // drum id, curing log id, test id, "<boilerId>:<date>:<shift>", line id
+  level      Int
+  dueAt      DateTime         @db.Timestamptz(3)
+  firedAt    DateTime?        @db.Timestamptz(3)
+  resolvedAt DateTime?        @db.Timestamptz(3) // condition cleared – stop escalating
+
+  alertId String?
+  alert   Alert?  @relation(fields: [alertId], references: [id])
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([trigger, objectType, objectId, level])
+  @@index([resolvedAt, dueAt])
+  @@map("escalations")
+}
+
+/// Alert Log – one row per WhatsApp message (guide 3.9). Audit trail.
+model Alert {
+  id         String        @id @default(cuid())
+  trigger    AlertTrigger
+  level      Int?
+  personId   String?
+  person     Person?       @relation(fields: [personId], references: [id])
+  phone      String?
+  message    String        @db.Text
+  objectRefs String[] // display refs: drum nos / lot nos in this message
+  route      WhatsAppRoute
+  isTest     Boolean       @default(true) // test mode – labelled [TEST]
+  status     AlertStatus   @default(QUEUED)
+  attempts   Int           @default(0)
+  providerId String? // message no / provider id / sheet row
+  error      String?
+  queuedAt   DateTime      @default(now()) @db.Timestamptz(3)
+  sentAt     DateTime?     @db.Timestamptz(3)
+
+  escalations Escalation[]
+
+  @@index([status, queuedAt])
+  @@index([trigger, sentAt])
+  @@map("alerts")
+}
+
+// -----------------------------------------------------------------------------
+// Reporting, settings, jobs, audit
+// -----------------------------------------------------------------------------
+
+/// Daily snapshot at 08:00 IST (guide 3.12) – used for the 30-day trend
+model DailyHistory {
+  id   String   @id @default(cuid())
+  date DateTime @unique @db.Date
+
+  madeCount         Int @default(0)
+  missingCount      Int @default(0)
+  inCuringCount     Int @default(0)
+  awaitingTestCount Int @default(0)
+  testOverdueCount  Int @default(0)
+  failedCount       Int @default(0)
+  passedCount       Int @default(0)
+  sentCount         Int @default(0)
+
+  inCuringKm     Decimal? @db.Decimal(10, 3)
+  awaitingTestKm Decimal? @db.Decimal(10, 3)
+  passedKm       Decimal? @db.Decimal(10, 3)
+  sentKm         Decimal? @db.Decimal(10, 3)
+
+  passRatePct      Decimal? @db.Decimal(5, 2)
+  complianceByLine Json? // { "SIOPLAS_3": { "day": 92.5, "MORNING": 100, ... }, ... }
+  openEscalations  Int      @default(0)
+  source           String   @default("job:W0") // "import" for rows copied from the sheet
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@map("daily_history")
+}
+
+/// Key–value settings (guide 3.13). All limits in section 5 / 9 live here.
+model Setting {
+  key         String   @id
+  value       Json
+  description String?
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+  updatedBy   String?
+
+  @@map("settings")
+}
+
+/// One row per background job run (W0–W7)
+model JobRun {
+  id           String    @id @default(cuid())
+  job          String // W1_DRUM_SYNC, W2_MISSING_CHECK, ...
+  status       JobStatus @default(RUNNING)
+  startedAt    DateTime  @default(now()) @db.Timestamptz(3)
+  finishedAt   DateTime? @db.Timestamptz(3)
+  rowsRead     Int       @default(0)
+  rowsChanged  Int       @default(0)
+  alertsQueued Int       @default(0)
+  error        String?
+  details      Json?
+
+  @@index([job, startedAt])
+  @@map("job_runs")
+}
+
+/// One-time / repeat imports from Google Sheets (guide 4.3)
+model ImportBatch {
+  id           String    @id @default(cuid())
+  source       String // e.g. "Curing Sheet › Curing Log"
+  startedAt    DateTime  @default(now()) @db.Timestamptz(3)
+  finishedAt   DateTime? @db.Timestamptz(3)
+  rowsRead     Int       @default(0)
+  rowsImported Int       @default(0)
+  rowsRejected Int       @default(0)
+  report       Json? // rejected rows with reasons
+  importedBy   String?
+
+  @@map("import_batches")
+}
+
+/// Every change to every record (guide 3.14)
+model AuditLog {
+  id        String      @id @default(cuid())
+  tableName String
+  rowId     String
+  action    AuditAction
+  field     String?
+  oldValue  Json?
+  newValue  Json?
+  changedBy String? // user email or "job:W2"
+  source    AuditSource
+  changedAt DateTime    @default(now()) @db.Timestamptz(3)
+
+  @@index([tableName, rowId])
+  @@index([changedAt])
+  @@map("audit_logs")
+}
