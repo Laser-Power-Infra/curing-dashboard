@@ -1,0 +1,10 @@
+{
+  "crons": [
+    { "path": "/api/jobs/w2", "schedule": "5 * * * *" },
+    { "path": "/api/jobs/w3", "schedule": "20 * * * *" },
+    { "path": "/api/jobs/w4", "schedule": "35 * * * *" },
+    { "path": "/api/jobs/w5", "schedule": "50 * * * *" },
+    { "path": "/api/jobs/w6", "schedule": "10 * * * *" },
+    { "path": "/api/jobs/w7", "schedule": "45 2 * * *" }
+  ]
+}
