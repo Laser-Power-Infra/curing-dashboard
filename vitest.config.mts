@@ -2,6 +2,6 @@ import { defineConfig } from "vitest/config";
 import path from "node:path";
 
 export default defineConfig({
-  resolve: { alias: { "@": path.resolve(import.meta.dirname, "src") } },
-  test: { include: ["src/**/*.test.ts"] },
+  resolve: { alias: { "@": path.resolve(import.meta.dirname) } },
+  test: { include: ["{app,actions,components,hooks,lib,services,scripts}/**/*.test.ts"] },
 });

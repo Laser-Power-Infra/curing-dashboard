@@ -1,6 +1,6 @@
 // Prisma 7 config. The Prisma CLI (migrate, seed, studio) uses the DIRECT
 // (unpooled) Neon connection. The app at runtime uses the POOLED connection
-// through the Neon driver adapter – see src/lib/prisma.ts.
+// through the Neon driver adapter – see lib/prisma.ts.
 import "dotenv/config";
 import { defineConfig } from "prisma/config";
 
@@ -12,7 +12,7 @@ export default defineConfig({
   schema: "prisma/schema.prisma",
   migrations: {
     path: "prisma/migrations",
-    seed: "tsx prisma/seed.ts",
+    seed: "tsx seed/seed.ts",
   },
   datasource: { url },
 });

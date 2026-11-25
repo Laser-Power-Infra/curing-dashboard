@@ -3,7 +3,7 @@
 // Laser Power & Infra · Kharagpur · Sioplas 3 & 4 curing
 //
 // Stack: Next.js (App Router) · Neon Postgres · Prisma 7 (driver adapter)
-// Guide: Curing_Dashboard_Build_Guide.md (sections 3 and 5)
+// Guide: docs/Curing_Dashboard_Build_Guide.md (sections 3 and 5)
 //
 // Conventions
 //  - No hard deletes. Rows are closed / deactivated with a status or `active` flag.
@@ -15,7 +15,7 @@
 
 generator client {
   provider = "prisma-client"
-  output   = "../src/generated/prisma"
+  output   = "../generated/prisma"
 }
 
 datasource db {
@@ -206,6 +206,8 @@ model User {
   id          String    @id @default(cuid())
   email       String    @unique
   name        String?
+  /// scrypt "salt:hash"; null = no password set (Google-only or seeded user)
+  passwordHash String?
   roles       Role[]
   active      Boolean   @default(true)
   lastLoginAt DateTime? @db.Timestamptz(3)
@@ -555,6 +557,28 @@ model BoilerReading {
 
   @@unique([boilerId, date, shiftId])
   @@map("boiler_readings")
+}
+
+/// Water tank temperature log, row for row as the plant keeps it in the Curing Sheet › Boiler Temp Log tab.
+/// Several readings per shift are normal. Filled by the sheet import; BoilerReading above is the per-shift entry form.
+model BoilerTempLog {
+  id       String   @id @default(cuid())
+  date     DateTime @db.Date // IST day as written in the sheet
+  time     String? // "HH:mm" IST as logged
+  shift    String? // Morning / Afternoon / Night, as written
+  tank1C   Decimal? @db.Decimal(6, 2)
+  tank2C   Decimal? @db.Decimal(6, 2)
+  tank3C   Decimal? @db.Decimal(6, 2)
+  fuel     String? // Diesel / Wood
+  operator String?
+  remarks  String?
+  /// The row's cells joined: the sheet has no row ID, and this lets the import run again without duplicates.
+  rowKey   String   @unique
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([date])
+  @@map("boiler_temp_log")
 }
 
 /// Missing Drum Tracker – permanent record, never deleted, only closed (guide 3.8).
