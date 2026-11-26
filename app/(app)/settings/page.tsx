@@ -7,6 +7,7 @@ import { getSettings } from "@/lib/settings";
 import { fmtDateTime, fmtDuration, toIstInput } from "@/lib/format";
 import { Banner, Card, Chip, EmptyState, Field, Input, PageHeader, Select, StatusChip, Textarea } from "@/components/ui";
 import { Role } from "@/generated/prisma/enums";
+import { parseRoles } from "@/lib/roles";
 import { TRIGGER_LABEL } from "@/lib/alert-labels";
 import { ActionForm } from "@/components/action-form";
 import { approveRecipe, saveEscalationRule, savePerson, saveRecipe, saveSettings, saveShift, saveUnit, saveUser, setRecipeState, setTestMode } from "@/actions/settings";
@@ -362,7 +363,7 @@ async function Users({ user }: { user: SessionUser }) {
         <fieldset className="mt-2">
           <legend className="text-sm font-medium text-slate-800">Roles</legend>
           <div className="grid grid-cols-2 lg:grid-cols-3">
-            {Object.values(Role).map((r) => <Check key={r} name="roles" value={r} label={ROLE_LABEL[r]} defaultChecked={u?.roles.includes(r)} />)}
+            {Object.values(Role).map((r) => <Check key={r} name="roles" value={r} label={ROLE_LABEL[r]} defaultChecked={parseRoles(u?.role).includes(r)} />)}
           </div>
         </fieldset>
       </>
@@ -379,7 +380,7 @@ async function Users({ user }: { user: SessionUser }) {
             <Item
               key={u.id}
               editable={edit}
-              summary={<><strong className="break-all">{u.email}</strong>{u.name && <span className="text-slate-600">{u.name}</span>}{u.roles.map((r) => <Chip key={r} tone="blue">{ROLE_LABEL[r]}</Chip>)}{!u.roles.length && <Chip>Viewer</Chip>}{!u.active && <Chip tone="red">Inactive</Chip>}</>}
+              summary={<><strong className="break-all">{u.email}</strong>{u.name && <span className="text-slate-600">{u.name}</span>}{parseRoles(u.role).map((r) => <Chip key={r} tone="blue">{ROLE_LABEL[r]}</Chip>)}{!parseRoles(u.role).length && <Chip>Viewer</Chip>}{!u.active && <Chip tone="red">Inactive</Chip>}</>}
             >
               <ActionForm action={saveUser} submit="Save user">{fields(u)}</ActionForm>
             </Item>

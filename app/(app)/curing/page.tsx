@@ -2,12 +2,10 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { can, viewer } from "@/lib/auth";
 import { fmtDateTime, fmtDuration, istDayStart, parseDateOnly } from "@/lib/format";
-import { Button, EmptyState, Field, Input, LinkButton, PageHeader, STATUS, Select, StatusChip, Table } from "@/components/ui";
+import { Button, Field, Input, LinkButton, PageHeader, STATUS, Select, StatusChip, Table } from "@/components/ui";
+import { PAGE_SIZE, facets, pageOf, searchOf } from "@/lib/table";
+import { DrumStatus, TestResult, TimeCheck } from "@/generated/prisma/enums";
 import type { Prisma } from "@/generated/prisma/client";
-import type { DrumStatus } from "@/generated/prisma/enums";
-
-const PAGE = 50;
-const STATUSES: DrumStatus[] = ["IN_CURING", "AWAITING_TEST", "TEST_OVERDUE", "FAILED", "PASSED", "REQUISITION_RAISED", "SENT"];
 
 export default async function CuringPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const user = await viewer();
@@ -15,45 +13,53 @@ export default async function CuringPage({ searchParams }: { searchParams: Promi
   const sp = await searchParams;
   const one = (k: string) => (typeof sp[k] === "string" ? sp[k] : "");
   const line = one("line");
-  const status = STATUSES.find((s) => s === one("status"));
   const from = parseDateOnly(one("from"));
   const to = parseDateOnly(one("to"));
-  const page = Math.max(1, Math.floor(Number(one("page"))) || 1);
+  const q = searchOf(sp);
+  const page = pageOf(sp);
 
-  const where: Prisma.CuringLogWhereInput = {};
-  if (line) where.drum = { lineId: line };
-  if (status) where.lotStatus = status;
+  // Form filters and the search box. The column-header filters are added on top (AND).
+  const base: Prisma.CuringLogWhereInput = {};
+  if (line) base.drum = { lineId: line };
   if (from || to)
-    where.curingStartAt = {
+    base.curingStartAt = {
       gte: from ? istDayStart(from) : undefined,
       lt: to ? new Date(istDayStart(to).getTime() + 86_400_000) : undefined,
     };
+  if (q) base.OR = (["lotNo", "coreDrumNo", "xlpeCompound", "productName", "chamberTankText"] as const).map((k) => ({ [k]: { contains: q, mode: "insensitive" } }));
+
+  const label = (v: string) => STATUS[v]?.label ?? v;
+  const head = await facets(
+    sp,
+    {
+      lotNo: { header: "Lot no" },
+      coreDrumNo: { header: "Drum no" },
+      cycleNo: { header: "Cycle", int: true },
+      xlpeCompound: { header: "Compound" },
+      timeCheck: { header: "Time check", label, values: Object.keys(TimeCheck) },
+      testResult: { header: "Result", label, values: Object.keys(TestResult) },
+      lotStatus: { header: "Status", param: "status", label, values: Object.keys(DrumStatus) },
+    },
+    async (field, others) => (await prisma.curingLog.groupBy({ by: [field], where: { AND: [base, ...(others as Prisma.CuringLogWhereInput[])] }, _count: { _all: true } })).map((g) => ({ value: g[field], count: g._count._all })),
+  );
+  const where: Prisma.CuringLogWhereInput = { AND: [base, ...(head.where as Prisma.CuringLogWhereInput[])] };
 
   const [lines, total, rows] = await Promise.all([
     prisma.line.findMany({ where: { inScope: true }, orderBy: { name: "asc" } }),
     prisma.curingLog.count({ where }),
-    prisma.curingLog.findMany({ where, include: { curingUnit: true }, orderBy: { curingStartAt: "desc" }, skip: (page - 1) * PAGE, take: PAGE }),
+    prisma.curingLog.findMany({ where, include: { curingUnit: true }, orderBy: { curingStartAt: "desc" }, skip: (page - 1) * PAGE_SIZE, take: PAGE_SIZE }),
   ]);
-  const pageHref = (p: number) =>
-    `/curing?${new URLSearchParams({ line, status: status ?? "", from: one("from"), to: one("to"), page: String(p) })}`;
-
   return (
     <>
       <PageHeader title="Curing log" sub={`${total} ${total === 1 ? "entry" : "entries"}`}>
         {mayWrite && <LinkButton href="/curing/new">New curing entry</LinkButton>}
       </PageHeader>
 
-      <form method="get" className="mb-4 grid grid-cols-2 items-end gap-3 sm:grid-cols-5">
+      <form method="get" className="mb-4 grid grid-cols-2 items-end gap-3 sm:grid-cols-4">
         <Field id="line" label="Line">
           <Select id="line" name="line" defaultValue={line}>
             <option value="">All lines</option>
             {lines.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
-          </Select>
-        </Field>
-        <Field id="status" label="Status">
-          <Select id="status" name="status" defaultValue={status ?? ""}>
-            <option value="">All</option>
-            {STATUSES.map((s) => <option key={s} value={s}>{STATUS[s].label}</option>)}
           </Select>
         </Field>
         <Field id="from" label="Started from">
@@ -68,10 +74,7 @@ export default async function CuringPage({ searchParams }: { searchParams: Promi
         </div>
       </form>
 
-      {rows.length === 0 ? (
-        <EmptyState>No curing entries for these filters</EmptyState>
-      ) : (
-        <Table>
+      <Table server={{ total, page, pageSize: PAGE_SIZE, q, filters: head.filters }}>
           <thead>
             <tr>
               <th>Lot no</th><th>Drum no</th><th>Cycle</th><th>Tank</th><th>Compound</th><th>Start</th><th>End</th>
@@ -100,16 +103,7 @@ export default async function CuringPage({ searchParams }: { searchParams: Promi
               </tr>
             ))}
           </tbody>
-        </Table>
-      )}
-
-      {total > PAGE && (
-        <nav aria-label="Pages" className="mt-4 flex items-center gap-3 text-sm text-slate-600">
-          {page > 1 && <LinkButton variant="secondary" href={pageHref(page - 1)}>Previous</LinkButton>}
-          <span>Page {page} of {Math.ceil(total / PAGE)}</span>
-          {page * PAGE < total && <LinkButton variant="secondary" href={pageHref(page + 1)}>Next</LinkButton>}
-        </nav>
-      )}
+      </Table>
     </>
   );
 }

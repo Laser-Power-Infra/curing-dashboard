@@ -4,8 +4,9 @@ import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@/generated/prisma/client";
 import { viewer } from "@/lib/auth";
 import { fmtDateOnly, fmtDateTime, fmtDuration, fmtM, hoursBetween, parseDateOnly } from "@/lib/format";
-import { Button, Chip, EmptyState, Field, Input, PageHeader, Select, StatusChip, Table } from "@/components/ui";
-import { PAGE_SIZE, Pager, one, pageOf, qs, type SP } from "@/components/drums/shared";
+import { Button, Chip, Field, Input, PageHeader, Select, StatusChip, Table } from "@/components/ui";
+import { one, qs } from "@/components/drums/shared";
+import { PAGE_SIZE, pageOf, searchOf, type SP } from "@/lib/table";
 import { TrackerEdit } from "@/components/tracker/edit";
 import { REASONS, mayEditTracker, trackId, type TrackerField } from "@/lib/tracker";
 
@@ -28,7 +29,8 @@ export default async function TrackerPage({ searchParams }: { searchParams: Prom
   const reason = reasonStr && reasonStr in REASONS ? (reasonStr as keyof typeof REASONS) : undefined;
   const levelStr = one(sp.level);
   const level = levelStr && /^\d+$/.test(levelStr) ? Number(levelStr) : undefined;
-  const page = pageOf(sp.page);
+  const page = pageOf(sp);
+  const q = searchOf(sp);
   const fromDate = parseDateOnly(from);
   const toDate = parseDateOnly(to);
   const filters = { line, from: fromDate ? from : undefined, to: toDate ? to : undefined, reason, level };
@@ -41,6 +43,15 @@ export default async function TrackerPage({ searchParams }: { searchParams: Prom
     },
     ...(reason && { reason }),
     ...(level !== undefined && { escalationLevel: level }),
+    ...(q && {
+      OR: [
+        { drum: { drumNo: { contains: q, mode: "insensitive" } } },
+        { drum: { gridEntryId: { contains: q, mode: "insensitive" } } },
+        { drum: { coreItem: { contains: q, mode: "insensitive" } } },
+        { remarks: { contains: q, mode: "insensitive" } },
+        { mdRemarks: { contains: q, mode: "insensitive" } },
+      ],
+    }),
   };
   const where = { ...base, ...tab.where };
 
@@ -86,6 +97,7 @@ export default async function TrackerPage({ searchParams }: { searchParams: Prom
 
       <form method="get" className="mb-4 grid grid-cols-2 items-end gap-3 md:grid-cols-6">
         <input type="hidden" name="tab" value={tab.key} />
+        {q && <input type="hidden" name="q" value={q} />}
         <Field id="f-line" label="Line">
           <Select id="f-line" name="line" defaultValue={line ?? ""}>
             <option value="">All lines</option>
@@ -114,10 +126,7 @@ export default async function TrackerPage({ searchParams }: { searchParams: Prom
         <Button type="submit" variant="secondary">Show</Button>
       </form>
 
-      {rows.length === 0 ? (
-        <EmptyState>{tab.key === "open" ? "No missing drums right now" : "No rows match"}</EmptyState>
-      ) : (
-        <Table>
+      <Table server={{ total, page, pageSize: PAGE_SIZE, q, filters: {} }}>
           <thead>
             <tr>
               <th>Track ID</th>
@@ -172,9 +181,7 @@ export default async function TrackerPage({ searchParams }: { searchParams: Prom
               </tr>
             ))}
           </tbody>
-        </Table>
-      )}
-      <Pager path="/tracker" params={{ ...filters, tab: tab.key }} page={page} total={total} />
+      </Table>
     </>
   );
 }

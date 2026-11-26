@@ -5,6 +5,7 @@ import { audit } from "@/lib/audit";
 import { parseIstInput } from "@/lib/format";
 import { Prisma } from "@/generated/prisma/client";
 import { Role } from "@/generated/prisma/enums";
+import { parseRoles, rolesText } from "@/lib/roles";
 import type { ActionState } from "@/components/ui/client";
 import { Fail, diff, num, run, str } from "./run";
 
@@ -131,7 +132,7 @@ export async function saveUser(_: ActionState, fd: FormData): Promise<ActionStat
   return run("settings", async (user) => {
     const id = str(fd, "id");
     const roles = Object.values(Role).filter((r) => fd.getAll("roles").includes(r));
-    const data = { name: str(fd, "name") || null, roles, active: on(fd, "active") };
+    const data = { name: str(fd, "name") || null, role: rolesText(roles), active: on(fd, "active") };
     if (!id) {
       const email = str(fd, "email").toLowerCase();
       if (!EMAIL.test(email)) throw new Fail("Enter the user's company email.");
@@ -141,9 +142,10 @@ export async function saveUser(_: ActionState, fd: FormData): Promise<ActionStat
     }
     const old = await prisma.user.findUnique({ where: { id } });
     if (!old) throw new Fail("User not found.");
-    const wasAdmin = old.active && old.roles.includes("ADMIN");
+    const wasAdmin = old.active && parseRoles(old.role).includes("ADMIN");
     const staysAdmin = data.active && roles.includes("ADMIN");
-    if (wasAdmin && !staysAdmin && !(await prisma.user.count({ where: { id: { not: id }, active: true, roles: { has: "ADMIN" } } })))
+    const otherAdmins = (await prisma.user.findMany({ where: { id: { not: id }, active: true }, select: { role: true } })).filter((u) => parseRoles(u.role).includes("ADMIN"));
+    if (wasAdmin && !staysAdmin && !otherAdmins.length)
       throw new Fail("This is the last active Admin. Make another user Admin first.");
     await prisma.user.update({ where: { id }, data });
     await audit("users", id, "UPDATE", diff(old, data), user.email);

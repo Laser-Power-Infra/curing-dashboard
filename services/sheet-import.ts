@@ -1,4 +1,4 @@
-// Pure helpers for the one-time Curing Sheet import (guide 4.3). The database side is scripts/import-sheet.ts.
+// Pure helpers for the one-time Curing Sheet import (guide 4.3). The database side is services/sheet-sync.ts.
 
 /** RFC 4180 CSV: quoted fields may hold commas, newlines and doubled quotes. */
 export function parseCsv(text: string): string[][] {

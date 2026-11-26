@@ -72,7 +72,7 @@ The Google Sheets are imported **once** (Section 4.3), then kept **read-only** a
 | ORM | **Prisma 7** with the **Neon driver adapter** (`@prisma/adapter-neon`) | Prisma 7 needs `prisma.config.ts`, the `prisma-client` generator and a driver adapter |
 | Auth | Google sign-in (Auth.js) restricted to the company domain | Roles from the `users` table |
 | UI | Tailwind CSS + a component library (e.g. shadcn/ui), Recharts for charts | Follow Sections 7–8 |
-| Jobs | Vercel Cron / n8n calling protected route handlers (`/api/jobs/w1` … `w7`) | Protect them with a `CRON_SECRET` header |
+| Jobs | Vercel Cron / n8n calling protected route handlers (`/api/jobs/w1` … `w7`) | Protect them with a `CURING_API_KEY` header |
 | Hosting | Vercel (or any Node 22+ host) | Region close to the Neon region (Singapore / Mumbai) |
 
 ### Files provided (`curing-dashboard-db/`)

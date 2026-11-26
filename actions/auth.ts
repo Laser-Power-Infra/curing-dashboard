@@ -26,6 +26,6 @@ export async function signUp(form: FormData) {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 8 || password.length > 200) redirect("/login?error=invalid");
   // Never set a password on an existing row: that would hand a seeded admin or Google user's roles to whoever asks first.
   if (await prisma.user.findUnique({ where: { email } })) redirect("/login?error=exists");
-  await prisma.user.create({ data: { email, passwordHash: hashPassword(password), roles: [] } });
+  await prisma.user.create({ data: { email, passwordHash: hashPassword(password) } });
   await logIn(form);
 }

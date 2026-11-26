@@ -1,5 +1,4 @@
 // Alerts & Escalations – read-only (guide 6.8, 3.9, 3.10).
-import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { isStaff, viewer } from "@/lib/auth";
 import { getSettings } from "@/lib/settings";
@@ -7,9 +6,9 @@ import { fmtDateTime, istDayStart, parseDateOnly } from "@/lib/format";
 import { Banner, Button, Card, Chip, EmptyState, Field, Input, LinkButton, PageHeader, Select, Table, type Tone } from "@/components/ui";
 import type { AlertStatus, AlertTrigger } from "@/generated/prisma/enums";
 import type { Prisma } from "@/generated/prisma/client";
+import { PAGE_SIZE, pageOf } from "@/lib/table";
 import { TRIGGER_LABEL } from "@/lib/alert-labels";
 
-const PAGE = 50;
 // Not the shared StatusChip: there "FAILED" means a failed hot set, here it means a message that did not go out.
 const DELIVERY: Record<AlertStatus, { label: string; tone: Tone }> = {
   SENT: { label: "Sent", tone: "green" },
@@ -29,7 +28,7 @@ export default async function AlertsPage({ searchParams }: { searchParams: Promi
   const level = /^\d+$/.test(one("level")) ? Number(one("level")) : undefined;
   const from = parseDateOnly(one("from"));
   const to = parseDateOnly(one("to"));
-  const page = Math.max(1, Number(one("page")) || 1);
+  const page = pageOf(sp);
   const where: Prisma.AlertWhereInput = {
     trigger,
     status,
@@ -42,7 +41,7 @@ export default async function AlertsPage({ searchParams }: { searchParams: Promi
     getSettings(),
     prisma.person.findMany({ orderBy: { name: "asc" } }),
     prisma.alert.count({ where }),
-    prisma.alert.findMany({ where, include: { person: true }, orderBy: { queuedAt: "desc" }, skip: (page - 1) * PAGE, take: PAGE }),
+    prisma.alert.findMany({ where, include: { person: true }, orderBy: { queuedAt: "desc" }, skip: (page - 1) * PAGE_SIZE, take: PAGE_SIZE }),
     prisma.escalationRule.findMany({ include: { recipients: true } }),
     // shortcut: the 300 longest-open escalations; add paging if more than that are ever open at once.
     prisma.escalation.findMany({ where: { resolvedAt: null, OR: [{ firedAt: { not: null } }, { dueAt: { lte: now } }] }, orderBy: { dueAt: "asc" }, take: 300 }),
@@ -80,13 +79,6 @@ export default async function AlertsPage({ searchParams }: { searchParams: Promi
     const next = nextDue ? `Level ${e.level + 1} ${nextDue <= now ? "was due" : "due"} ${fmtDateTime(nextDue)} → ${nxt!.recipients.map((p) => p.name).join(", ") || "nobody set"}` : "This is the last level";
     for (const name of cur?.recipients.length ? cur.recipients.map((p) => p.name) : ["Nobody set for this level"]) byPerson.set(name, [...(byPerson.get(name) ?? []), { e, next }]);
   }
-
-  const qs = (p: number) => {
-    const q = new URLSearchParams(Object.entries(sp).filter((kv): kv is [string, string] => typeof kv[1] === "string" && kv[1] !== ""));
-    q.set("page", String(p));
-    return `/alerts?${q}#log`;
-  };
-  const pages = Math.max(1, Math.ceil(total / PAGE));
 
   return (
     <>
@@ -160,10 +152,7 @@ export default async function AlertsPage({ searchParams }: { searchParams: Promi
         </div>
       </form>
 
-      {!alerts.length ? (
-        <EmptyState>{total || page === 1 ? "No messages match these filters." : "No more messages."}</EmptyState>
-      ) : (
-        <Table>
+      <Table server={{ total, page, pageSize: PAGE_SIZE, q: null, filters: {} }}>
           <thead>
             <tr><th>Sent / queued</th><th>Alert</th><th>Level</th><th>Person</th><th>Number</th><th>Delivery</th><th>Tries</th><th>Message</th></tr>
           </thead>
@@ -191,15 +180,7 @@ export default async function AlertsPage({ searchParams }: { searchParams: Promi
               </tr>
             ))}
           </tbody>
-        </Table>
-      )}
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-sm text-slate-600">
-        <span>{total} message{total === 1 ? "" : "s"} · page {page} of {pages}</span>
-        <span className="flex gap-2">
-          {page > 1 && <Link href={qs(page - 1)} className="flex min-h-11 items-center rounded-md border border-slate-300 bg-white px-4 text-slate-800">Newer</Link>}
-          {page < pages && <Link href={qs(page + 1)} className="flex min-h-11 items-center rounded-md border border-slate-300 bg-white px-4 text-slate-800">Older</Link>}
-        </span>
-      </div>
+      </Table>
     </>
   );
 }

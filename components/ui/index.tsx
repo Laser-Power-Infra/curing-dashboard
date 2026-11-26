@@ -129,17 +129,9 @@ export function Banner({ tone = "amber", children }: { tone?: Tone; children: Re
   return <div role="status" className={cx("mb-4 rounded-md border px-3 py-2 text-sm", TONE[tone])}>{children}</div>;
 }
 
-// --- Table: sticky header, scrolls sideways on a phone ------------------------------------------
-// Use plain <thead>/<tbody>/<tr>/<th>/<td> inside; the classes below style them.
-export function Table({ children }: { children: ReactNode }) {
-  return (
-    <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
-      <table className="w-full border-collapse text-sm [&_td]:border-t [&_td]:border-slate-100 [&_td]:px-3 [&_td]:py-2 [&_td]:align-middle [&_th]:sticky [&_th]:top-0 [&_th]:bg-slate-50 [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:text-xs [&_th]:font-semibold [&_th]:whitespace-nowrap [&_th]:text-slate-600 [&_tbody_tr:hover]:bg-slate-50">
-        {children}
-      </table>
-    </div>
-  );
-}
+// --- Table: own scroll area, fixed header, search and a filter on every column (see ./table.tsx) ---
+// Use plain <thead>/<tbody>/<tr>/<th>/<td> inside.
+export { Table } from "./table";
 
 // --- Form fields: every input has a label (guide 7) ---------------------------------------------
 export const inputClass =

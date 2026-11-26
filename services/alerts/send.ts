@@ -1,4 +1,6 @@
 // The one place a WhatsApp message leaves the dashboard (guide D4). Every message is an Alert row.
+import { randomUUID } from "node:crypto";
+import amqp from "amqplib";
 import { prisma } from "@/lib/prisma";
 import type { Settings } from "@/lib/settings";
 import type { AlertStatus, AlertTrigger } from "@/generated/prisma/enums";
@@ -6,28 +8,38 @@ import type { AlertStatus, AlertTrigger } from "@/generated/prisma/enums";
 export type Recipient = { id: string; name: string; whatsapp: string | null };
 export type Message = { trigger: AlertTrigger; level?: number | null; person: Recipient; text: string; objectRefs?: string[] };
 
-// Evolution API v2: POST /message/sendText/{instance} with { number, text }.
-// (v1 took { number, textMessage: { text } } – change the body here if the server is v1.)
-async function evolutionSendText(number: string, text: string): Promise<string | null> {
-  const { EVOLUTION_API_URL: url, EVOLUTION_API_KEY: apikey, EVOLUTION_INSTANCE: instance } = process.env;
-  const res = await fetch(`${url!.replace(/\/+$/, "")}/message/sendText/${encodeURIComponent(instance!)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", apikey: apikey! },
-    body: JSON.stringify({ number, text }),
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!res.ok) throw new Error(`Evolution API ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  const body = (await res.json().catch(() => null)) as { key?: { id?: string } } | null;
-  return body?.key?.id ?? null;
+const QUEUE = "notifications";
+
+/**
+ * Put one message on the company's notification queue; a separate service sends the WhatsApp.
+ * `to` is digits with country code. Returns the message id. Throws if the broker did not accept it.
+ */
+// shortcut: one connection per message, fine for a handful of alerts per run; share a connection if runs send hundreds.
+export async function queueWhatsApp(to: string, text: string): Promise<string> {
+  const id = randomUUID();
+  const conn = await amqp.connect(process.env.RABBITMQ_URL!, { timeout: 8000 });
+  try {
+    const ch = await conn.createConfirmChannel();
+    await ch.checkQueue(QUEUE); // the queue belongs to the sender service: fail if it is missing, never create it
+    ch.sendToQueue(QUEUE, Buffer.from(JSON.stringify({ id, version: 1, notification_platform: "whatsapp", recipient: { to }, text })), {
+      persistent: true,
+      contentType: "application/json",
+      messageId: id,
+    });
+    await ch.waitForConfirms();
+  } finally {
+    await conn.close().catch(() => {});
+  }
+  return id;
 }
 
 /**
- * Log and send one message. Never throws for a failed send: the failure is recorded on the alert.
+ * Log and queue one message. Never throws for a failed send: the failure is recorded on the alert.
+ * SENT means the queue accepted it; delivery to the phone is the sender service's job.
  * Test mode: the text is labelled [TEST] and goes only to settings.testNumbers.
  */
 export async function sendMessage(m: Message, settings: Settings): Promise<{ id: string; status: AlertStatus }[]> {
-  const { EVOLUTION_API_URL, EVOLUTION_API_KEY, EVOLUTION_INSTANCE } = process.env;
-  const configured = !!(EVOLUTION_API_URL && EVOLUTION_API_KEY && EVOLUTION_INSTANCE);
+  const configured = !!process.env.RABBITMQ_URL;
   const test = settings.testMode;
   const text = test ? `[TEST] For ${m.person.name}\n${m.text}` : m.text;
   const numbers: (string | null)[] = test ? (settings.testNumbers.length ? settings.testNumbers : [null]) : [m.person.whatsapp];
@@ -61,7 +73,7 @@ export async function sendMessage(m: Message, settings: Settings): Promise<{ id:
     while (attempts < max) {
       attempts++;
       try {
-        providerId = await evolutionSendText(phone, text);
+        providerId = await queueWhatsApp(phone, text);
         error = null;
         break;
       } catch (e) {

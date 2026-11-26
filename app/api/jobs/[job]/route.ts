@@ -1,5 +1,10 @@
-// Background jobs W1–W7 (guide 10):  /api/jobs/w1 … /api/jobs/w7
-// Every call needs the header   Authorization: Bearer <CRON_SECRET>.   GET (Vercel cron) and POST (n8n) both work.
+// Background jobs W1–W7 (guide 10):  /api/jobs/w1 … /api/jobs/w7,  plus the sheet sync at /api/jobs/sync
+// The sheet sync reads the Google Sheets, updates the dashboard and runs the rules, which send the alerts.
+//
+// Called by the Ofelia scheduler on the company server (d:/infrastructure › ofelia/scripts/api/curing-job.sh)
+// and by n8n. Every call needs the secret CURING_API_KEY, as   x-api-key: <secret>   or   Authorization: Bearer <secret>.
+//   GET   checks the secret only and answers {"auth":"ok"}. It does not run the job.
+//   POST  runs the job and answers {"success": true|false, …}.
 //
 // W1 drum sync – the n8n workflow POSTs the "Drum Register" rows to /api/jobs/w1 as JSON:
 //   {
@@ -27,14 +32,16 @@
 //   { "ok": true, "job": "W1_DRUM_SYNC", "rowsRead": 40, "rowsChanged": 3, "alerts": 0,
 //     "details": { "inserted": 3, "timeFilled": 0, "alreadyThere": 36, "outOfScope": 0, "rejectedCount": 1,
 //                  "rejected": [ { "row": 7, "gridEntryId": "331200", "reason": "Drum no is blank" } ] } }
-// A GET, or a POST without rows, records a successful run with zero rows.
+// A POST without rows records a successful run with zero rows.
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
+import { sheetSync } from "@/services/sheet-sync";
 import { alertJobFailure, boilerWatch, curingLogWatch, drumSync, mdSummary, rulesJob, type JobResult } from "@/services/jobs";
 
-export const maxDuration = 60;
+export const maxDuration = 300; // the sheet sync reads six tabs and re-runs every rule
 
 const JOBS: Record<string, { name: string; run: (body: unknown) => Promise<JobResult> }> = {
+  sync: { name: "SHEET_SYNC", run: () => sheetSync() },
   w1: { name: "W1_DRUM_SYNC", run: drumSync },
   w2: { name: "W2_MISSING_CHECK", run: rulesJob("job:W2") },
   w3: { name: "W3_CURING_LOG_WATCH", run: curingLogWatch },
@@ -46,23 +53,33 @@ const JOBS: Record<string, { name: string; run: (body: unknown) => Promise<JobRe
 
 const digest = (s: string) => createHash("sha256").update(s).digest();
 
-async function handle(req: Request, { params }: { params: Promise<{ job: string }> }) {
-  const secret = process.env.CRON_SECRET;
+function allowed(req: Request) {
+  const secret = process.env.CURING_API_KEY;
+  const given = req.headers.get("x-api-key") ?? (req.headers.get("authorization") ?? "").replace(/^Bearer /, "");
   // Hashing first gives equal lengths, so the compare takes the same time for any input.
-  if (!secret || !timingSafeEqual(digest(req.headers.get("authorization") ?? ""), digest(`Bearer ${secret}`)))
-    return Response.json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  return !!secret && timingSafeEqual(digest(given), digest(secret));
+}
+
+type Ctx = { params: Promise<{ job: string }> };
+
+export async function GET(req: Request, { params }: Ctx) {
+  if (!allowed(req)) return Response.json({ success: false, error: "Unauthorized" }, { status: 401 });
+  if (!JOBS[(await params).job.toLowerCase()]) return Response.json({ success: false, error: "Unknown job" }, { status: 404 });
+  return Response.json({ auth: "ok" });
+}
+
+export async function POST(req: Request, { params }: Ctx) {
+  if (!allowed(req)) return Response.json({ success: false, error: "Unauthorized" }, { status: 401 });
 
   const job = JOBS[(await params).job.toLowerCase()];
-  if (!job) return Response.json({ ok: false, error: "Unknown job" }, { status: 404 });
+  if (!job) return Response.json({ success: false, error: "Unknown job" }, { status: 404 });
 
   let body: unknown = null;
-  if (req.method === "POST") {
-    const text = await req.text();
-    try {
-      body = text.trim() ? JSON.parse(text) : null;
-    } catch {
-      return Response.json({ ok: false, error: "Body is not valid JSON" }, { status: 400 });
-    }
+  const text = await req.text();
+  try {
+    body = text.trim() ? JSON.parse(text) : null;
+  } catch {
+    return Response.json({ success: false, error: "Body is not valid JSON" }, { status: 400 });
   }
 
   const run = await prisma.jobRun.create({ data: { job: job.name } });
@@ -72,14 +89,12 @@ async function handle(req: Request, { params }: { params: Promise<{ job: string 
       where: { id: run.id },
       data: { status: "SUCCESS", finishedAt: new Date(), rowsRead: r.rowsRead, rowsChanged: r.rowsChanged, alertsQueued: r.alerts, details: r.details },
     });
-    return Response.json({ ok: true, job: job.name, ...r });
+    return Response.json({ success: true, ok: true, job: job.name, ...r });
   } catch (e) {
     const error = (e instanceof Error ? e.message : String(e)).slice(0, 1000);
     console.error(`[${job.name}]`, e);
     await prisma.jobRun.update({ where: { id: run.id }, data: { status: "FAILED", finishedAt: new Date(), error } });
     await alertJobFailure(job.name, run.id, error).catch((err) => console.error("[JOB_FAILURE alert]", err));
-    return Response.json({ ok: false, job: job.name, error: error.slice(0, 300) }, { status: 500 });
+    return Response.json({ success: false, ok: false, job: job.name, error: error.slice(0, 300) }, { status: 500 });
   }
 }
-
-export { handle as GET, handle as POST };

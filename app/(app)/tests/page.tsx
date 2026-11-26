@@ -3,21 +3,45 @@ import { prisma } from "@/lib/prisma";
 import { can, viewer } from "@/lib/auth";
 import { getSettings } from "@/lib/settings";
 import { fmtDateTime, fmtM } from "@/lib/format";
-import { Chip, EmptyState, LinkButton, PageHeader, StatusChip, Table } from "@/components/ui";
+import { Chip, EmptyState, LinkButton, PageHeader, STATUS, StatusChip, Table } from "@/components/ui";
+import { PAGE_SIZE, facets, pageOf, searchOf, type SP } from "@/lib/table";
+import { TestResult } from "@/generated/prisma/enums";
+import type { Prisma } from "@/generated/prisma/client";
 
 const QUEUE_MAX = 100;
 
-export default async function TestsPage() {
+export default async function TestsPage({ searchParams }: { searchParams: Promise<SP> }) {
+  const sp = await searchParams;
+  const q = searchOf(sp);
+  const page = pageOf(sp);
+  // Search box of the Results table. The column-header filters are added on top (AND).
+  const base: Prisma.HotSetTestWhereInput = q
+    ? { OR: [{ lotNo: { contains: q, mode: "insensitive" } }, { testedBy: { contains: q, mode: "insensitive" } }, { curingLog: { coreDrumNo: { contains: q, mode: "insensitive" } } }] }
+    : {};
+  const head = await facets(
+    sp,
+    {
+      result: { header: "Result", label: (v) => STATUS[v]?.label ?? v, values: Object.keys(TestResult) },
+      lotNo: { header: "Lot no" },
+      sampleEnd: { header: "Sample end" },
+      testType: { header: "Test type" },
+      testedBy: { header: "Tested by" },
+    },
+    async (field, others) => (await prisma.hotSetTest.groupBy({ by: [field], where: { AND: [base, ...(others as Prisma.HotSetTestWhereInput[])] }, _count: { _all: true } })).map((g) => ({ value: g[field], count: g._count._all })),
+  );
+  const where: Prisma.HotSetTestWhereInput = { AND: [base, ...(head.where as Prisma.HotSetTestWhereInput[])] };
+
   const user = await viewer();
   const mayWrite = can(user, "testEntry");
-  const [settings, due, recent] = await Promise.all([
+  const [settings, due, recent, total] = await Promise.all([
     getSettings(),
     prisma.curingLog.findMany({
       where: { curingEndAt: { not: null }, testResult: null, hotSetTests: { none: {} } },
       orderBy: [{ testDueAt: { sort: "asc", nulls: "last" } }, { curingEndAt: "asc" }],
       take: QUEUE_MAX,
     }),
-    prisma.hotSetTest.findMany({ include: { curingLog: true }, orderBy: { testedAt: "desc" }, take: 50 }),
+    prisma.hotSetTest.findMany({ where, include: { curingLog: true }, orderBy: { testedAt: "desc" }, skip: (page - 1) * PAGE_SIZE, take: PAGE_SIZE }),
+    prisma.hotSetTest.count({ where }),
   ]);
   const now = new Date();
   const overdueFrom = now.getTime() - settings.testOverdueGraceHours * 3_600_000;
@@ -61,11 +85,8 @@ export default async function TestsPage() {
       </section>
 
       <section>
-        <h2 className="mb-2 text-sm font-semibold text-slate-900">Recent results</h2>
-        {recent.length === 0 ? (
-          <EmptyState>No results entered yet</EmptyState>
-        ) : (
-          <Table>
+        <h2 className="mb-2 text-sm font-semibold text-slate-900">Results</h2>
+        <Table server={{ total, page, pageSize: PAGE_SIZE, q, filters: head.filters }}>
             <thead>
               <tr><th>Tested</th><th>Result</th><th>Lot no</th><th>Drum no</th><th>Sample end</th><th>Test type</th><th>Hot set %</th><th>Permanent set %</th><th>Tested by</th></tr>
             </thead>
@@ -84,8 +105,7 @@ export default async function TestsPage() {
                 </tr>
               ))}
             </tbody>
-          </Table>
-        )}
+        </Table>
       </section>
     </>
   );

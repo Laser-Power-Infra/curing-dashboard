@@ -7,19 +7,35 @@ import { Banner, Card, EmptyState, Field, Input, PageHeader, Select, Table, Text
 import { ActionForm } from "@/components/action-form";
 import { saveReading } from "@/actions/boiler";
 import { currentShift, shiftWindow } from "@/lib/shifts";
+import { PAGE_SIZE, facets, pageOf, searchOf, type SP } from "@/lib/table";
+import type { Prisma } from "@/generated/prisma/client";
 
 const DAYS = 14;
 
 /** Every row of the plant's water tank log (Curing Sheet › Boiler Temp Log), newest first. */
-async function TankLog() {
-  const rows = await prisma.boilerTempLog.findMany({ orderBy: [{ date: "desc" }, { time: "desc" }] });
+async function TankLog({ sp }: { sp: SP }) {
+  const q = searchOf(sp);
+  const page = pageOf(sp);
+  const base: Prisma.BoilerTempLogWhereInput = q
+    ? { OR: (["operator", "remarks", "shift", "fuel"] as const).map((k) => ({ [k]: { contains: q, mode: "insensitive" } })) }
+    : {};
+  const head = await facets(
+    sp,
+    // "shift" in the URL already means the shift picked in the entry form above.
+    { shift: { header: "Shift", param: "logShift" }, fuel: { header: "Boiler on" }, operator: { header: "Operator" } },
+    async (field, others) => (await prisma.boilerTempLog.groupBy({ by: [field], where: { AND: [base, ...(others as Prisma.BoilerTempLogWhereInput[])] }, _count: { _all: true } })).map((g) => ({ value: g[field], count: g._count._all })),
+  );
+  const where: Prisma.BoilerTempLogWhereInput = { AND: [base, ...(head.where as Prisma.BoilerTempLogWhereInput[])] };
+  const [total, rows] = await Promise.all([
+    prisma.boilerTempLog.count({ where }),
+    prisma.boilerTempLog.findMany({ where, orderBy: [{ date: "desc" }, { time: "desc" }], skip: (page - 1) * PAGE_SIZE, take: PAGE_SIZE }),
+  ]);
   const t = (v: unknown) => (v == null ? "–" : `${Number(v)}`);
   return (
     <section aria-labelledby="tank-log" className="mt-8">
       <h2 id="tank-log" className="mb-1 text-base font-semibold text-slate-900">Boiler temp log</h2>
-      <p className="mb-2 text-sm text-slate-600">Water tank temperatures as logged by the boiler operators. {rows.length} records, newest first.</p>
-      {rows.length ? (
-        <Table>
+      <p className="mb-2 text-sm text-slate-600">Water tank temperatures as logged by the boiler operators. Newest first.</p>
+      <Table server={{ total, page, pageSize: PAGE_SIZE, q, filters: head.filters }}>
           <thead>
             <tr><th>Date</th><th>Time</th><th>Shift</th><th>Tank 1 °C</th><th>Tank 2 °C</th><th>Tank 3 °C</th><th>Boiler on</th><th>Operator</th><th>Remarks</th></tr>
           </thead>
@@ -38,10 +54,7 @@ async function TankLog() {
               </tr>
             ))}
           </tbody>
-        </Table>
-      ) : (
-        <EmptyState>No records yet. They come from the Curing Sheet import.</EmptyState>
-      )}
+      </Table>
     </section>
   );
 }
@@ -62,7 +75,7 @@ export default async function BoilerPage({ searchParams }: { searchParams: Promi
       <>
         <PageHeader title="Boiler log" />
         <EmptyState>No boilers or shifts are set up yet. Add them in Settings.</EmptyState>
-        <TankLog />
+        <TankLog sp={sp} />
       </>
     );
   }
@@ -161,7 +174,7 @@ export default async function BoilerPage({ searchParams }: { searchParams: Promi
           </section>
         ))}
       </div>
-      <TankLog />
+      <TankLog sp={sp} />
     </>
   );
 }

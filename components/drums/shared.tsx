@@ -1,8 +1,7 @@
-// URL helpers and the pager shared by the Overview, Drum list and Missing Drum Tracker.
-import { LinkButton } from "@/components/ui";
+// URL helpers shared by the Overview, Drum list and Missing Drum Tracker.
 import { istDay, istDayStart } from "@/lib/format";
 
-export type SP = Record<string, string | string[] | undefined>;
+export type { SP } from "@/lib/table";
 export const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v)?.trim() || undefined;
 
 export function qs(params: Record<string, string | number | undefined>) {
@@ -18,23 +17,4 @@ export function sentSince(kind: string | undefined, now: Date): Date | null {
   const today = istDay(now);
   const back = kind === "week" ? (today.getUTCDay() + 6) % 7 : 0;
   return istDayStart(new Date(today.getTime() - back * 86_400_000));
-}
-
-export const PAGE_SIZE = 50;
-export const pageOf = (v: string | string[] | undefined) => Math.max(1, Math.floor(Number(one(v))) || 1);
-
-export function Pager({ path, params, page, total }: { path: string; params: Record<string, string | number | undefined>; page: number; total: number }) {
-  if (total <= PAGE_SIZE) return null;
-  const last = Math.ceil(total / PAGE_SIZE);
-  return (
-    <nav aria-label="Pages" className="mt-3 flex flex-wrap items-center justify-between gap-2 text-sm text-slate-600">
-      <span>
-        {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of {total}
-      </span>
-      <span className="flex gap-2">
-        {page > 1 && <LinkButton variant="secondary" href={`${path}${qs({ ...params, page: page - 1 })}`}>Previous</LinkButton>}
-        {page < last && <LinkButton variant="secondary" href={`${path}${qs({ ...params, page: page + 1 })}`}>Next</LinkButton>}
-      </span>
-    </nav>
-  );
 }

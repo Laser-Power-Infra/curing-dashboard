@@ -5,8 +5,9 @@ import type { Prisma } from "@/generated/prisma/client";
 import { DrumStatus } from "@/generated/prisma/enums";
 import { viewer } from "@/lib/auth";
 import { fmtDateOnly, fmtDateTime, fmtM, parseDateOnly } from "@/lib/format";
-import { Button, Chip, EmptyState, Field, Input, PageHeader, STATUS, Select, StatusChip, Table } from "@/components/ui";
-import { PAGE_SIZE, Pager, one, pageOf, sentSince, type SP } from "@/components/drums/shared";
+import { Button, Chip, Field, PageHeader, STATUS, Select, StatusChip, Table } from "@/components/ui";
+import { one, sentSince } from "@/components/drums/shared";
+import { PAGE_SIZE, facets, many, pageOf, type SP } from "@/lib/table";
 
 export default async function DrumsPage({ searchParams }: { searchParams: Promise<SP> }) {
   await viewer();
@@ -16,17 +17,17 @@ export default async function DrumsPage({ searchParams }: { searchParams: Promis
   const sent = one(sp.sent);
   const time = one(sp.time);
   const dateStr = one(sp.date);
-  const statusStr = one(sp.status);
-  const status = statusStr && statusStr in DrumStatus ? (statusStr as DrumStatus) : undefined;
-  const page = pageOf(sp.page);
+  // Asked for by status (a KPI tile link or the Status column filter).
+  const statuses = many(sp.status).filter((s) => s in DrumStatus) as DrumStatus[];
+  const page = pageOf(sp);
   const sentFrom = sentSince(sent, new Date());
   const date = parseDateOnly(dateStr);
 
-  const where: Prisma.DrumWhereInput = {
+  // Everything except the column-header filters, which are added on top (AND).
+  const base: Prisma.DrumWhereInput = {
     line: { inScope: true, ...(line && { code: line }) },
     // Non-curing items stay out of every list unless searched for or asked for by status.
-    ...(!q && status !== "NOT_CURING_ITEM" && { isCuringItem: true }),
-    ...(status && { status }),
+    ...(!q && !statuses.includes("NOT_CURING_ITEM") && { isCuringItem: true }),
     ...(sentFrom && { curingLogs: { some: { sentDate: { gte: sentFrom } } } }),
     ...(date && { unloadDate: date }),
     ...(time === "unknown" && { unloadedAt: null }),
@@ -38,6 +39,17 @@ export default async function DrumsPage({ searchParams }: { searchParams: Promis
       ],
     }),
   };
+
+  const head = await facets(
+    sp,
+    {
+      drumNo: { header: "Drum no" },
+      coreItem: { header: "Item" },
+      status: { header: "Status", label: (v) => STATUS[v]?.label ?? v, values: Object.keys(DrumStatus) },
+    },
+    async (field, others) => (await prisma.drum.groupBy({ by: [field], where: { AND: [base, ...(others as Prisma.DrumWhereInput[])] }, _count: { _all: true } })).map((g) => ({ value: g[field], count: g._count._all })),
+  );
+  const where: Prisma.DrumWhereInput = { AND: [base, ...(head.where as Prisma.DrumWhereInput[])] };
 
   const [lines, total, drums] = await Promise.all([
     prisma.line.findMany({ where: { inScope: true }, orderBy: { name: "asc" } }),
@@ -62,17 +74,8 @@ export default async function DrumsPage({ searchParams }: { searchParams: Promis
       <PageHeader title="Drums" sub={`${total} drum${total === 1 ? "" : "s"}${extra.length ? ` · ${extra.join(" · ")}` : ""}`} />
 
       <form method="get" className="mb-4 grid grid-cols-1 items-end gap-3 sm:grid-cols-4">
-        <Field id="f-q" label="Drum no, lot no or Grid ID">
-          <Input id="f-q" name="q" type="search" defaultValue={q} />
-        </Field>
-        <Field id="f-status" label="Status">
-          <Select id="f-status" name="status" defaultValue={status ?? ""}>
-            <option value="">All</option>
-            {Object.keys(DrumStatus).map((s) => (
-              <option key={s} value={s}>{STATUS[s]?.label ?? s}</option>
-            ))}
-          </Select>
-        </Field>
+        {q && <input type="hidden" name="q" value={q} />}
+        {statuses.map((s) => <input key={s} type="hidden" name="status" value={s} />)}
         <Field id="f-line" label="Line">
           <Select id="f-line" name="line" defaultValue={line ?? ""}>
             <option value="">All lines</option>
@@ -87,10 +90,7 @@ export default async function DrumsPage({ searchParams }: { searchParams: Promis
         <Button type="submit" variant="secondary">Show</Button>
       </form>
 
-      {drums.length === 0 ? (
-        <EmptyState>No drums match. <Link href="/drums" className="font-medium text-blue-700 underline">Clear filters</Link></EmptyState>
-      ) : (
-        <Table>
+      <Table server={{ total, page, pageSize: PAGE_SIZE, q: q ?? "", filters: head.filters }}>
           <thead>
             <tr>
               <th>Grid ID</th>
@@ -123,9 +123,7 @@ export default async function DrumsPage({ searchParams }: { searchParams: Promis
               </tr>
             ))}
           </tbody>
-        </Table>
-      )}
-      <Pager path="/drums" params={{ q, status, line, sent: sentFrom ? sent : undefined, date: date ? dateStr : undefined, time: time === "unknown" ? time : undefined }} page={page} total={total} />
+      </Table>
     </>
   );
 }

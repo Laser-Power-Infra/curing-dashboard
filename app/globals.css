@@ -10,3 +10,30 @@ body {
   /* numbers line up in tables and KPI tiles (guide 8) */
   font-variant-numeric: tabular-nums;
 }
+
+/* The window itself never scrolls: #main does. A list table that is a direct child of #main
+   takes the height that is left and scrolls its own rows; everything else keeps its height. */
+#main > * {
+  flex-shrink: 0;
+}
+#main > [data-fit] {
+  flex: 1 1 20rem;
+  min-height: 20rem;
+}
+#main > [data-fit] > [data-scroll] {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+}
+@media print {
+  #main > [data-fit] {
+    flex: none;
+  }
+}
+
+/* Rows on other pages of a browser-paged table: hidden on screen, printed in full. */
+@media screen {
+  tr[data-off] {
+    display: none;
+  }
+}

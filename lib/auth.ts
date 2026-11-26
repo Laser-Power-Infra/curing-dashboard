@@ -6,6 +6,7 @@ import Google from "next-auth/providers/google";
 import Credentials from "next-auth/providers/credentials";
 import { prisma } from "@/lib/prisma";
 import { verifyPassword } from "@/lib/password";
+import { parseRoles } from "@/lib/roles";
 import type { Role } from "@/generated/prisma/enums";
 
 /** Google sign-in is optional: it is offered only when its credentials are in the environment. */
@@ -68,8 +69,9 @@ export const getUser = cache(async (): Promise<SessionUser | null> => {
   if (!email) return null;
   const row = await prisma.user.findUnique({ where: { email } });
   if (row && !row.active) return null;
-  // Accounts with no roles yet (self sign-up, or a company Google account not in the table) are read-only viewers.
-  return { email, name: row?.name ?? session?.user?.name ?? email, roles: row?.roles.length ? row.roles : ["VIEWER"] };
+  // "user" (the default after sign-up) and a company Google account not in the table are read-only viewers.
+  const roles = parseRoles(row?.role);
+  return { email, name: row?.name ?? session?.user?.name ?? email, roles: roles.length ? roles : ["VIEWER"] };
 });
 
 const GUEST: SessionUser = { email: "", name: "Guest", roles: ["VIEWER"] };

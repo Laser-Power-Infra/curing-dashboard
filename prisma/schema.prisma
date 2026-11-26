@@ -208,7 +208,8 @@ model User {
   name        String?
   /// scrypt "salt:hash"; null = no password set (Google-only or seeded user)
   passwordHash String?
-  roles       Role[]
+  /// Plain text so it can be edited by hand: "user" (read only), "admin", or roles separated by commas. See lib/roles.ts.
+  role        String    @default("user")
   active      Boolean   @default(true)
   lastLoginAt DateTime? @db.Timestamptz(3)
 
