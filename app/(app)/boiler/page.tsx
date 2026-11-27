@@ -2,8 +2,9 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { can, viewer } from "@/lib/auth";
-import { fmtDateOnly, fmtDateTime, istDay, parseDateOnly } from "@/lib/format";
-import { Banner, Card, EmptyState, Field, Input, PageHeader, Select, Table, Textarea } from "@/components/ui";
+import { fmtDateOnly, fmtDateTime, fmtDuration, fmtKm, hoursBetween, istDay, istDayStart, parseDateOnly } from "@/lib/format";
+import { Item } from "../drums/item";
+import { Banner, Card, DrumInfo, EmptyState, Field, Input, PageHeader, Select, Table, Textarea } from "@/components/ui";
 import { ActionForm } from "@/components/action-form";
 import { saveReading } from "@/actions/boiler";
 import { currentShift, shiftWindow } from "@/lib/shifts";
@@ -11,6 +12,50 @@ import { PAGE_SIZE, facets, pageOf, searchOf, type SP } from "@/lib/table";
 import type { Prisma } from "@/generated/prisma/client";
 
 const DAYS = 14;
+
+/** The drums in the water tanks right now: curing started, not ended. */
+async function InTank({ now }: { now: Date }) {
+  const rows = await prisma.curingLog.findMany({
+    where: { curingEndAt: null, sentDate: null },
+    include: { curingUnit: true, product: { select: { code: true } }, drum: { select: { party: true, coreItem: true, product: { select: { code: true } } } } },
+    orderBy: { curingStartAt: "asc" },
+  });
+  const tank = (r: (typeof rows)[number]) => r.curingUnit?.name ?? r.chamberTankText ?? "–";
+  rows.sort((a, b) => tank(a).localeCompare(tank(b)));
+  return (
+    <section aria-labelledby="in-tank" className="mb-6">
+      <h2 id="in-tank" className="mb-2 text-base font-semibold text-slate-900">In the tank now</h2>
+      {rows.length ? (
+        <Table>
+          <thead>
+            <tr><th>Tank</th><th>Drum no</th><th>Lot no</th><th>Party</th><th>Item</th><th>Length</th><th>Compound</th><th>In since</th><th>Time in tank</th><th>Planned end</th></tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const end = r.plannedCuringHrs == null ? null : new Date(r.curingStartAt.getTime() + Number(r.plannedCuringHrs) * 3_600_000);
+              return (
+                <tr key={r.id}>
+                  <td className="font-medium whitespace-nowrap">{tank(r)}</td>
+                  <td>{r.drumId ? <Link href={`/drums/${r.drumId}`} className="font-medium text-blue-700 underline">{r.coreDrumNo}</Link> : r.coreDrumNo}</td>
+                  <td>{r.lotNo ?? "–"}</td>
+                  <td>{r.drum ? (r.drum.party ?? "–") : <DrumInfo drum={null} />}</td>
+                  <td><Item name={r.productName ?? r.drum?.coreItem} code={(r.product ?? r.drum?.product)?.code} /></td>
+                  <td className="whitespace-nowrap tabular-nums">{r.lengthM == null ? "–" : fmtKm(r.lengthM)}</td>
+                  <td>{r.xlpeCompound ?? "–"}</td>
+                  <td className="whitespace-nowrap">{fmtDateTime(r.curingStartAt)}</td>
+                  <td className="whitespace-nowrap tabular-nums">{fmtDuration(hoursBetween(r.curingStartAt, now))}</td>
+                  <td className={`whitespace-nowrap ${end && end <= now ? "font-medium text-red-800" : ""}`}>{end ? `${fmtDateTime(end)}${end <= now ? " – over" : ""}` : "–"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </Table>
+      ) : (
+        <EmptyState>No drum is in a tank right now.</EmptyState>
+      )}
+    </section>
+  );
+}
 
 /** Every row of the plant's water tank log (Curing Sheet › Boiler Temp Log), newest first. */
 async function TankLog({ sp }: { sp: SP }) {
@@ -28,26 +73,66 @@ async function TankLog({ sp }: { sp: SP }) {
   const where: Prisma.BoilerTempLogWhereInput = { AND: [base, ...(head.where as Prisma.BoilerTempLogWhereInput[])] };
   const [total, rows] = await Promise.all([
     prisma.boilerTempLog.count({ where }),
-    prisma.boilerTempLog.findMany({ where, orderBy: [{ date: "desc" }, { time: "desc" }], skip: (page - 1) * PAGE_SIZE, take: PAGE_SIZE }),
+    prisma.boilerTempLog.findMany({ where, orderBy: [{ date: "desc" }, { time: "desc" }], skip: (page - 1) * PAGE_SIZE, take: PAGE_SIZE + 1 }), // one extra: the last row's gap needs the reading before it
   ]);
-  const t = (v: unknown) => (v == null ? "–" : `${Number(v)}`);
+  const at = (r: { date: Date; time: string | null }) => {
+    const [h, m] = (r.time ?? "").split(":").map(Number);
+    return Number.isFinite(h) && Number.isFinite(m) ? r.date.getTime() + (h * 60 + m) * 60_000 : null;
+  };
+  /** Hours since the reading before this one (the next row down), or null when either time is missing or out of order. */
+  const gap = (i: number) => {
+    const a = at(rows[i]), b = rows[i + 1] && at(rows[i + 1]);
+    return a != null && b != null && a >= b ? (a - b) / 3_600_000 : null;
+  };
+  // Which drum was in each tank when the reading was taken: the curing rows whose start–end covers the reading's time.
+  const times = rows.slice(0, PAGE_SIZE).map(at).filter((v) => v != null).map((v) => istDayStart(new Date(v)).getTime());
+  const curing = times.length
+    ? await prisma.curingLog.findMany({
+        // An open row that is already marked sent is old data with no end time, not a drum still in the tank.
+        where: { chamberTankText: { startsWith: "Water Tank" }, curingStartAt: { lte: new Date(Math.max(...times)) }, OR: [{ curingEndAt: { gte: new Date(Math.min(...times)) } }, { curingEndAt: null, sentDate: null }] },
+        select: { id: true, coreDrumNo: true, drumId: true, chamberTankText: true, curingStartAt: true, curingEndAt: true },
+        orderBy: { curingStartAt: "asc" },
+      })
+    : [];
+  const cell = (r: (typeof rows)[number], n: 1 | 2 | 3) => {
+    const v = r[`tank${n}C`];
+    const a = at(r);
+    const when = a == null ? null : istDayStart(new Date(a));
+    const inside = when ? curing.filter((c) => c.chamberTankText === `Water Tank ${n}` && c.curingStartAt <= when && (!c.curingEndAt || c.curingEndAt >= when)) : [];
+    return (
+      <td>
+        <span className="tabular-nums">{v == null ? "–" : `${Number(v)}`}</span>
+        <span className="block text-xs whitespace-nowrap text-slate-600">
+          {inside.length
+            ? inside.map((c, i) => (
+                <span key={c.id}>
+                  {i ? ", " : "Drum "}
+                  {c.drumId ? <Link href={`/drums/${c.drumId}`} className="font-medium text-blue-700 underline">{c.coreDrumNo}</Link> : <span className="font-medium text-slate-900">{c.coreDrumNo}</span>}
+                </span>
+              ))
+            : "No drum"}
+        </span>
+      </td>
+    );
+  };
   return (
     <section aria-labelledby="tank-log" className="mt-8">
       <h2 id="tank-log" className="mb-1 text-base font-semibold text-slate-900">Boiler temp log</h2>
-      <p className="mb-2 text-sm text-slate-600">Water tank temperatures as logged by the boiler operators. Newest first.</p>
+      <p className="mb-2 text-sm text-slate-600">Water tank temperatures as logged by the boiler operators, with the drum that was in each tank at that time (from the curing log). Newest first.</p>
       <Table server={{ total, page, pageSize: PAGE_SIZE, q, filters: head.filters }}>
           <thead>
-            <tr><th>Date</th><th>Time</th><th>Shift</th><th>Tank 1 °C</th><th>Tank 2 °C</th><th>Tank 3 °C</th><th>Boiler on</th><th>Operator</th><th>Remarks</th></tr>
+            <tr><th>Date</th><th>Time</th><th>Since last reading</th><th>Shift</th><th>Tank 1 °C</th><th>Tank 2 °C</th><th>Tank 3 °C</th><th>Boiler on</th><th>Operator</th><th>Remarks</th></tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
+            {rows.slice(0, PAGE_SIZE).map((r, i) => (
               <tr key={r.id}>
                 <td className="whitespace-nowrap">{fmtDateOnly(r.date)}</td>
                 <td className="whitespace-nowrap tabular-nums">{r.time ?? "–"}</td>
+                <td className="whitespace-nowrap tabular-nums">{gap(i) == null ? "–" : fmtDuration(gap(i))}</td>
                 <td>{r.shift ?? "–"}</td>
-                <td className="tabular-nums">{t(r.tank1C)}</td>
-                <td className="tabular-nums">{t(r.tank2C)}</td>
-                <td className="tabular-nums">{t(r.tank3C)}</td>
+                {cell(r, 1)}
+                {cell(r, 2)}
+                {cell(r, 3)}
                 <td>{r.fuel ?? "–"}</td>
                 <td className="whitespace-nowrap">{r.operator ?? "–"}</td>
                 <td>{r.remarks ?? ""}</td>
@@ -74,6 +159,7 @@ export default async function BoilerPage({ searchParams }: { searchParams: Promi
     return (
       <>
         <PageHeader title="Boiler log" />
+        <InTank now={now} />
         <EmptyState>No boilers or shifts are set up yet. Add them in Settings.</EmptyState>
         <TankLog sp={sp} />
       </>
@@ -96,6 +182,8 @@ export default async function BoilerPage({ searchParams }: { searchParams: Promi
     <>
       <PageHeader title="Boiler log" sub="One reading for each boiler in each shift. A shift with no reading turns red once the shift has ended." />
       {shifts.some((s) => !s.confirmed) && <Banner>Shift timings are not confirmed by the plant yet. They can be changed in Settings.</Banner>}
+
+      <InTank now={now} />
 
       {can(user, "boilerEntry") && (
         <Card title="Enter a reading" className="mb-6">
