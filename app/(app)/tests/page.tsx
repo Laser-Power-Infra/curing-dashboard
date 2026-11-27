@@ -2,13 +2,16 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { can, viewer } from "@/lib/auth";
 import { getSettings } from "@/lib/settings";
+import { logScope } from "@/lib/scope";
+import { checkEntry } from "@/services/sheet-import";
 import { fmtDateTime, fmtM } from "@/lib/format";
-import { Chip, EmptyState, LinkButton, PageHeader, STATUS, StatusChip, Table } from "@/components/ui";
+import { Chip, DrumInfo, EmptyState, LinkButton, PageHeader, STATUS, StatusChip, Table } from "@/components/ui";
 import { PAGE_SIZE, facets, pageOf, searchOf, type SP } from "@/lib/table";
 import { TestResult } from "@/generated/prisma/enums";
 import type { Prisma } from "@/generated/prisma/client";
 
 const QUEUE_MAX = 100;
+const pct = (v: unknown) => (v == null ? null : Number(v));
 
 export default async function TestsPage({ searchParams }: { searchParams: Promise<SP> }) {
   const sp = await searchParams;
@@ -33,16 +36,20 @@ export default async function TestsPage({ searchParams }: { searchParams: Promis
 
   const user = await viewer();
   const mayWrite = can(user, "testEntry");
-  const [settings, due, recent, total] = await Promise.all([
+  const drum = { include: { product: { select: { code: true } }, curingLogs: { select: { cycleNo: true } } } } as const;
+  const [settings, dueAll, recent, total] = await Promise.all([
     getSettings(),
+    // Same drums as the Overview's Awaiting test + Test overdue: in scope (lib/scope.ts), not sent, latest cycle (filtered below).
     prisma.curingLog.findMany({
-      where: { curingEndAt: { not: null }, testResult: null, hotSetTests: { none: {} } },
+      where: { ...logScope(), curingEndAt: { not: null }, testResult: null, sentDate: null, hotSetTests: { none: {} } },
+      include: { drum },
       orderBy: [{ testDueAt: { sort: "asc", nulls: "last" } }, { curingEndAt: "asc" }],
       take: QUEUE_MAX,
     }),
-    prisma.hotSetTest.findMany({ where, include: { curingLog: true }, orderBy: { testedAt: "desc" }, skip: (page - 1) * PAGE_SIZE, take: PAGE_SIZE }),
+    prisma.hotSetTest.findMany({ where, include: { curingLog: { include: { drum } } }, orderBy: { testedAt: "desc" }, skip: (page - 1) * PAGE_SIZE, take: PAGE_SIZE }),
     prisma.hotSetTest.count({ where }),
   ]);
+  const due = dueAll.filter((r) => !r.drum?.curingLogs.some((c) => c.cycleNo > r.cycleNo));
   const now = new Date();
   const overdueFrom = now.getTime() - settings.testOverdueGraceHours * 3_600_000;
 
@@ -51,13 +58,13 @@ export default async function TestsPage({ searchParams }: { searchParams: Promis
       <PageHeader title="Hot set test" sub="Drums out of curing that still need a result, most urgent first" />
 
       <section className="mb-6">
-        <h2 className="mb-2 text-sm font-semibold text-slate-900">Tests due{due.length === QUEUE_MAX && ` – first ${QUEUE_MAX}`}</h2>
+        <h2 className="mb-2 text-sm font-semibold text-slate-900">Tests due{dueAll.length === QUEUE_MAX && ` – first ${QUEUE_MAX}`}</h2>
         {due.length === 0 ? (
           <EmptyState>No tests due right now</EmptyState>
         ) : (
           <Table>
             <thead>
-              <tr><th>Test due</th><th></th><th>Lot no</th><th>Drum no</th><th>Length</th><th>Curing ended</th><th></th></tr>
+              <tr><th>Test due</th><th></th><th>Lot no</th><th>Drum no</th><th>Party / Item</th><th>Length</th><th>Curing ended</th><th></th></tr>
             </thead>
             <tbody>
               {due.map((r) => {
@@ -73,6 +80,7 @@ export default async function TestsPage({ searchParams }: { searchParams: Promis
                     </td>
                     <td>{r.lotNo ?? "–"}</td>
                     <td>{r.drumId ? <Link href={`/drums/${r.drumId}`} className="font-medium text-blue-700 underline">{r.coreDrumNo}</Link> : r.coreDrumNo}</td>
+                    <td><DrumInfo drum={r.drum ?? null} /></td>
                     <td className="whitespace-nowrap">{fmtM(r.lengthM)}</td>
                     <td className="whitespace-nowrap">{fmtDateTime(r.curingEndAt)}</td>
                     <td>{mayWrite && <LinkButton href={`/tests/new?log=${r.id}`} className="whitespace-nowrap">Enter result</LinkButton>}</td>
@@ -88,15 +96,21 @@ export default async function TestsPage({ searchParams }: { searchParams: Promis
         <h2 className="mb-2 text-sm font-semibold text-slate-900">Results</h2>
         <Table server={{ total, page, pageSize: PAGE_SIZE, q, filters: head.filters }}>
             <thead>
-              <tr><th>Tested</th><th>Result</th><th>Lot no</th><th>Drum no</th><th>Sample end</th><th>Test type</th><th>Hot set %</th><th>Permanent set %</th><th>Tested by</th></tr>
+              <tr><th>Tested</th><th>Result</th><th>Lot no</th><th>Drum no</th><th>Party / Item</th><th>Sample end</th><th>Test type</th><th>Hot set %</th><th>Permanent set %</th><th>Tested by</th></tr>
             </thead>
             <tbody>
               {recent.map((t) => (
                 <tr key={t.id}>
                   <td className="whitespace-nowrap">{fmtDateTime(t.testedAt)}</td>
-                  <td><StatusChip status={t.result} /></td>
+                  <td className="whitespace-nowrap">
+                    <StatusChip status={t.result} />
+                    {checkEntry(t.result, pct(t.hotSetPct), pct(t.permanentSetPct)) && (
+                      <span className="ml-1" title="The result as entered does not match the readings (limits: hot set 175 %, permanent set 15 %). Ask Suvajit to confirm."><Chip tone="amber">Check entry</Chip></span>
+                    )}
+                  </td>
                   <td>{t.lotNo ?? "–"}</td>
                   <td>{t.drumId ? <Link href={`/drums/${t.drumId}`} className="font-medium text-blue-700 underline">{t.curingLog.coreDrumNo}</Link> : t.curingLog.coreDrumNo}</td>
+                  <td><DrumInfo drum={t.curingLog.drum ?? null} /></td>
                   <td>{t.sampleEnd ?? "–"}</td>
                   <td>{t.testType ?? "–"}</td>
                   <td>{t.hotSetPct?.toString() ?? "–"}</td>

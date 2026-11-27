@@ -1,309 +1,325 @@
-// Overview (guide 6.1) – built for the MD on a 360 px phone first.
+// Operator home: "what to do now" – one card per open drum, the late ones first. Office numbers live at /office.
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
-import type { DrumStatus } from "@/generated/prisma/enums";
-import { viewer } from "@/lib/auth";
+import { DrumStatus, type AlertTrigger } from "@/generated/prisma/enums";
+import { can, viewer, type Perm, type SessionUser } from "@/lib/auth";
 import { getSettings } from "@/lib/settings";
-import { compliance, passRate, shiftOf } from "@/services/rules";
-import { fmtDateTime, fmtDuration, fmtKm, fmtM, fmtPct, hoursBetween, istDay } from "@/lib/format";
-import { Banner, Card, Chip, EmptyState, KpiTile, PageHeader, STATUS, Table, type Tone } from "@/components/ui";
-import { one, qs, sentSince, type SP } from "@/components/drums/shared";
+import { drumScope } from "@/lib/scope";
+import { fmtKm, fmtPct, istDay, istDayStart } from "@/lib/format";
+import { L } from "@/lib/labels";
+import { kindOf, nextAction, type Action, type Kind } from "@/lib/next-action";
+import { compliance, passRate } from "@/services/rules";
+import { Bi, EmptyState, STATUS } from "@/components/ui";
+import { ActionForm } from "@/components/action-form";
+import { one, qs, type SP } from "@/components/drums/shared";
+import { markDispatched, raiseRequisition } from "@/actions/transfers";
+import { BIG_BTN, BIG_FORM, DrumCard } from "@/components/home/drum-card";
+import { ladderLevels } from "@/components/home/ladder";
+import { Tour } from "@/components/home/tour";
 
 const DAY_MS = 86_400_000;
-const BAR: Record<Tone, string> = { red: "bg-red-600", amber: "bg-amber-500", blue: "bg-blue-600", green: "bg-green-600", grey: "bg-slate-400" };
-const PIPELINE: [DrumStatus, string][] = [
-  ["MADE", "Made"],
-  ["IN_CURING", "In curing"],
-  ["AWAITING_TEST", "Awaiting test"],
-  ["TEST_OVERDUE", "Test overdue"],
-  ["FAILED", "Failed"],
-  ["PASSED", "Passed"],
-  // Not in the guide's bar, but without it drums on a requisition would drop out of the picture.
-  ["REQUISITION_RAISED", "Requisition raised"],
-  ["SENT", "Sent"],
-];
-const isoDay = (d: Date) => d.toISOString().slice(0, 10);
+// shortcut: at most this many open drums per team (oldest unload first) and this many green cards drawn; add paging if the backlog outgrows it.
+const CAP = 200;
+const GREEN_SHOWN = 30;
 
-export default async function OverviewPage({ searchParams }: { searchParams: Promise<SP> }) {
-  await viewer();
-  const line = one((await searchParams).line);
+const VIEWS = [
+  { view: "all", label: "सब / All" },
+  { view: "curing", label: "Curing" },
+  { view: "lab", label: "Lab / Test" },
+  { view: "transfer", label: "भेजना / Transfer" },
+] as const;
+type View = (typeof VIEWS)[number]["view"];
+
+// The job in words, the big button's label and the permission it needs.
+const ACTIONS: Record<Exclude<Action, "none">, { text: string; button: string; perm: Perm }> = {
+  load: { text: "टैंक में डालें / Put in tank", button: L.loadInTank, perm: "curingEntry" },
+  endCuring: { text: "Curing खत्म करें / End curing", button: L.curingEnded, perm: "curingEntry" },
+  test: { text: "Test का नतीजा भरें / Enter test result", button: L.testResult, perm: "testEntry" },
+  requisition: { text: "Requisition बनाएँ / Raise requisition", button: L.raiseRequisition, perm: "transfer" },
+  dispatch: { text: "Polypark भेजें / Dispatch to Polypark", button: L.dispatched, perm: "transfer" },
+};
+// Whose rule names the responsible person of a card.
+const OWNER: Record<Kind, AlertTrigger> = { curing: "DRUM_NOT_IN_CURING", lab: "TEST_OVERDUE", transfer: "PASSED_NO_REQUISITION" };
+const TONE_ORDER = { red: 0, amber: 1, green: 2 };
+
+function defaultView(user: SessionUser): View {
+  if (user.roles.some((r) => r === "MD" || r === "PRODUCTION_HEAD" || r === "ADMIN")) return "all";
+  const mine = ([["CURING", "curing"], ["LAB", "lab"], ["TRANSFER", "transfer"]] as const).filter(([role]) => user.roles.includes(role));
+  return mine.length === 1 ? mine[0][1] : "all";
+}
+
+export default async function HomePage({ searchParams }: { searchParams: Promise<SP> }) {
+  const user = await viewer();
+  const asked = one((await searchParams).view);
+  const view = VIEWS.find((v) => v.view === asked)?.view ?? defaultView(user);
   const now = new Date();
   const today = istDay(now);
-  const yesterday = new Date(today.getTime() - DAY_MS);
-  const scope = { isCuringItem: true, line: { inScope: true, ...(line && { code: line }) } };
-  const sentAgg = (kind: string) =>
-    prisma.drum.aggregate({
-      where: { ...scope, status: "SENT", curingLogs: { some: { sentDate: { gte: sentSince(kind, now)! } } } },
-      _count: { _all: true },
-      _sum: { lengthM: true },
-    });
+  const scope = drumScope();
+  const kinds = (["curing", "lab", "transfer"] as const).filter((k) => view === "all" || view === k);
+  const openStatuses = Object.values(DrumStatus).filter((s) => s !== "SENT" && s !== "NOT_CURING_ITEM");
 
-  const [settings, allLines, shifts, byStatus, sentToday, sentWeek, missing, responsible, recent, tests, escalations, lastSync, noTime, dataErrors] =
-    await Promise.all([
-      getSettings(),
-      prisma.line.findMany({ where: { inScope: true }, orderBy: { name: "asc" } }),
-      prisma.shiftDef.findMany({ where: { active: true }, orderBy: { sortOrder: "asc" } }),
-      prisma.drum.groupBy({ by: ["status"], where: scope, _count: { _all: true }, _sum: { lengthM: true } }),
-      sentAgg("today"),
-      sentAgg("week"),
+  const [settings, byStatus, unloadedToday, tests, rules, ...perKind] = await Promise.all([
+    getSettings(),
+    prisma.drum.groupBy({ by: ["status"], where: scope, _count: { _all: true }, _sum: { lengthM: true } }),
+    prisma.drum.findMany({
+      where: { ...scope, unloadDate: today },
+      select: { unloadedAt: true, status: true, curingLogs: { where: { cycleNo: 1 }, select: { curingStartAt: true }, take: 1 } },
+    }),
+    prisma.hotSetTest.findMany({ where: { testedAt: { gte: new Date(now.getTime() - 30 * DAY_MS) }, curingLog: { cycleNo: 1, drum: scope } }, select: { result: true } }),
+    prisma.escalationRule.findMany({
+      where: { active: true, trigger: { in: ["DRUM_NOT_IN_CURING", "TEST_OVERDUE", "TEST_FAILED", "PASSED_NO_REQUISITION"] } },
+      orderBy: { level: "asc" },
+      include: { recipients: { where: { active: true }, select: { name: true }, orderBy: { name: "asc" } } },
+    }),
+    // One query per team, so a long backlog of one team cannot push the others' drums out of the cap.
+    ...kinds.map((k) =>
       prisma.drum.findMany({
-        where: { ...scope, status: "MISSING" },
-        orderBy: { unloadedAt: "asc" },
-        take: 200,
-        include: { line: true, tracker: { select: { escalationLevel: true } } },
+        where: { ...scope, status: { in: openStatuses.filter((s) => kindOf(s) === k) } },
+        orderBy: { unloadedAt: { sort: "asc", nulls: "last" } },
+        take: CAP,
+        include: {
+          line: { select: { name: true } },
+          product: { select: { code: true } },
+          // Latest cycle and its latest test, picked the way the rules engine picks them.
+          curingLogs: {
+            orderBy: [{ cycleNo: "desc" }, { curingStartAt: "desc" }],
+            take: 1,
+            include: {
+              hotSetTests: { orderBy: [{ testedAt: "desc" }, { createdAt: "desc" }], take: 1 },
+              requisition: { include: { _count: { select: { curingLogs: true } } } },
+            },
+          },
+        },
       }),
-      prisma.responsibility.findMany({ where: { area: "CURING_LOG", active: true, person: { active: true } }, orderBy: { isPrimary: "desc" }, include: { person: true } }),
-      prisma.drum.findMany({
-        where: { ...scope, unloadDate: { gte: yesterday, lte: today } },
-        select: { lineId: true, unloadDate: true, unloadedAt: true, status: true, curingLogs: { where: { cycleNo: 1 }, select: { curingStartAt: true }, take: 1 } },
-      }),
-      prisma.hotSetTest.findMany({
-        where: { testedAt: { gte: new Date(now.getTime() - 30 * DAY_MS) }, curingLog: { cycleNo: 1, drum: scope } },
-        select: { result: true },
-      }),
-      prisma.escalation.findMany({
-        where: { resolvedAt: null, firedAt: { not: null } },
-        select: { level: true, alert: { select: { person: { select: { name: true } } } } },
-      }),
-      prisma.jobRun.findFirst({ where: { job: "W1_DRUM_SYNC", status: "SUCCESS" }, orderBy: { startedAt: "desc" } }),
-      prisma.drum.count({ where: { ...scope, unloadedAt: null } }),
-      prisma.drum.count({ where: { ...scope, status: "DATA_ERROR" } }),
-    ]);
+    ),
+  ]);
+  const drums = perKind.flat();
 
-  const stat = (s: DrumStatus) => {
-    const g = byStatus.find((b) => b.status === s);
-    return { drums: g?._count._all ?? 0, m: Number(g?._sum.lengthM ?? 0) };
-  };
-  const drumsHref = (p: Record<string, string | undefined>) => `/drums${qs({ ...p, line })}`;
-  const tile = (s: DrumStatus, label: string) => {
-    const v = stat(s);
-    return <KpiTile label={label} value={v.drums} sub={fmtKm(v.m)} tone={STATUS[s].tone} href={drumsHref({ status: s })} />;
-  };
-  const pipeline = PIPELINE.map(([s, label]) => ({ s, label, ...stat(s) }));
+  const ids = drums.flatMap((d) => {
+    const log = d.curingLogs[0];
+    return [d.id, ...(log ? [log.id, ...log.hotSetTests.map((t) => t.id)] : [])];
+  });
+  const escalations = ids.length
+    ? await prisma.escalation.findMany({
+        where: { resolvedAt: null, firedAt: { not: null }, objectId: { in: ids } },
+        select: { trigger: true, objectId: true, level: true, firedAt: true },
+      })
+    : [];
+  const rulesOf = (trigger: AlertTrigger) => rules.filter((r) => r.trigger === trigger);
+  const responsibleOf = (kind: Kind) => rulesOf(OWNER[kind])[0]?.recipients.map((p) => p.name) ?? [];
 
-  const lines = allLines.filter((l) => !line || l.code === line);
-  const responsibleNames = responsible.map((r) => r.person.name).join(", ") || "Nobody set";
-
-  const comp = (lineId: string, day: Date, shift?: string) =>
-    compliance(
-      recent
-        .filter((d) => d.lineId === lineId && d.unloadDate.getTime() === day.getTime() && (!shift || (d.unloadedAt != null && shiftOf(d.unloadedAt, shifts) === shift)))
-        .map((d) => ({ unloadedAt: d.unloadedAt, curingStartAt: d.curingLogs[0]?.curingStartAt ?? null, dataError: d.status === "DATA_ERROR" })),
-      now,
-      settings.curingStartLimitHours,
+  const cards = drums
+    .map((d) => {
+      const log = d.curingLogs[0] ?? null;
+      const test = log?.hotSetTests[0] ?? null;
+      const req = log?.requisition && log.requisition.status !== "CANCELLED" ? log.requisition : null;
+      const a = nextAction(
+        d,
+        log && {
+          curingStartAt: log.curingStartAt,
+          curingEndAt: log.curingEndAt,
+          plannedCuringHrs: log.plannedCuringHrs == null ? null : Number(log.plannedCuringHrs),
+          testDueAt: log.testDueAt,
+          testedAt: test?.testedAt ?? null,
+          requisitionRaisedAt: req?.raisedAt ?? null,
+        },
+        now,
+        settings,
+      );
+      // The alert that watches this card, with the object and anchors services/rules/run.ts gives it.
+      const watch: { trigger: AlertTrigger; objectId: string } | null =
+        a.action === "load"
+          ? { trigger: "DRUM_NOT_IN_CURING", objectId: d.id }
+          : a.action === "test" && log
+            ? { trigger: "TEST_OVERDUE", objectId: log.id }
+            : a.action === "requisition" && log
+              ? { trigger: "PASSED_NO_REQUISITION", objectId: log.id }
+              : d.status === "FAILED" && test
+                ? { trigger: "TEST_FAILED", objectId: test.id }
+                : null;
+      const fired = watch ? escalations.filter((e) => e.trigger === watch.trigger && e.objectId === watch.objectId) : [];
+      // Someone has already been informed: the card is late whatever the clock says (e.g. passed, no requisition).
+      const tone = fired.length ? ("red" as const) : a.tone;
+      // The engine only alerts for drums unloaded after the alerts start date, so only those get a "next" line.
+      const alertable = !!settings.alertsEnabledFrom && (d.unloadedAt ?? istDayStart(d.unloadDate)) >= settings.alertsEnabledFrom;
+      const ladder =
+        watch && (tone === "red" || fired.length)
+          ? ladderLevels(
+              rulesOf(watch.trigger),
+              fired,
+              { FROM_UNLOAD: d.unloadedAt, FROM_TEST_DUE: log?.testDueAt, FROM_EVENT: watch.trigger === "TEST_OVERDUE" ? log?.testDueAt : test?.createdAt },
+              alertable,
+            )
+          : [];
+      return { d, log, req, a: { ...a, tone }, ladder };
+    })
+    .sort(
+      (x, y) =>
+        TONE_ORDER[x.a.tone] - TONE_ORDER[y.a.tone] ||
+        (x.a.deadline?.getTime() ?? Infinity) - (y.a.deadline?.getTime() ?? Infinity) ||
+        (x.a.since?.getTime() ?? Infinity) - (y.a.since?.getTime() ?? Infinity),
     );
-  const compCell = (lineCode: string, lineId: string, day: Date, shift?: string) => {
-    const c = comp(lineId, day, shift);
+
+  const button = ({ d, log, req, a }: (typeof cards)[number]) => {
+    if (a.action === "none") return null;
+    const act = ACTIONS[a.action];
+    if (!can(user, act.perm)) return null;
+    if (a.action === "load") return <Link href={`/curing/new${qs({ drum: d.id })}`} className={BIG_BTN}><Bi text={act.button} stack /></Link>;
+    if (!log) return null;
+    if (a.action === "endCuring") return <Link href={`/curing/${log.id}/end`} className={BIG_BTN}><Bi text={act.button} stack /></Link>;
+    if (a.action === "test") return <Link href={`/tests/new${qs({ log: log.id })}`} className={BIG_BTN}><Bi text={act.button} stack /></Link>;
+    if (a.action === "requisition")
+      return (
+        <ActionForm action={raiseRequisition} submit={act.button} confirm={`Raise a requisition for drum ${d.drumNo}?`} className={BIG_FORM}>
+          <input type="hidden" name="ids" value={log.id} />
+        </ActionForm>
+      );
+    if (!req || req.status !== "RAISED") return null;
+    const n = req._count.curingLogs;
     return (
-      <td className="tabular-nums">
-        <Link href={`/drums${qs({ line: lineCode, date: isoDay(day) })}`} className="inline-flex min-h-11 flex-col justify-center text-blue-700 underline">
-          {c.pct == null ? "Nothing due" : `${fmtPct(c.pct)} (${c.onTime} of ${c.due})`}
-        </Link>
-        {!shift && c.unknownTime > 0 && <div className="text-xs text-slate-600">{c.unknownTime} time unknown</div>}
-      </td>
+      <ActionForm
+        action={markDispatched}
+        submit={act.button}
+        confirm={`Mark requisition ${req.reqNo} as dispatched? This sends the whole requisition: ${n === 1 ? "this drum only" : `all ${n} drums on it, not only drum ${d.drumNo}`}.`}
+        className={BIG_FORM}
+      >
+        <input type="hidden" name="id" value={req.id} />
+      </ActionForm>
     );
   };
+  const card = (c: (typeof cards)[number]) => (
+    <li key={c.d.id}>
+      <DrumCard
+        drum={{ id: c.d.id, drumNo: c.d.drumNo, line: c.d.line.name, lengthM: c.d.lengthM, party: c.d.party, coreItem: c.d.coreItem, product: c.d.product }}
+        action={c.a}
+        actionText={c.a.action === "none" ? (STATUS[c.d.status]?.label ?? c.d.status) : ACTIONS[c.a.action].text}
+        now={now}
+        responsible={responsibleOf(c.a.kind)}
+        ladder={c.ladder}
+      >
+        {button(c)}
+      </DrumCard>
+    </li>
+  );
+  const red = cards.filter((c) => c.a.tone === "red");
+  const amber = cards.filter((c) => c.a.tone === "amber");
+  const green = cards.filter((c) => c.a.tone === "green");
 
-  const results = tests.map((t) => t.result);
-  const passed = results.filter((r) => r === "PASS").length;
+  // --- Management strip ---------------------------------------------------------------------
+  const stat = (...statuses: DrumStatus[]) => {
+    const g = byStatus.filter((b) => statuses.includes(b.status));
+    return { drums: g.reduce((s, b) => s + b._count._all, 0), m: g.reduce((s, b) => s + Number(b._sum.lengthM ?? 0), 0) };
+  };
+  const onTime = compliance(
+    unloadedToday.map((d) => ({ unloadedAt: d.unloadedAt, curingStartAt: d.curingLogs[0]?.curingStartAt ?? null, dataError: d.status === "DATA_ERROR" })),
+    now,
+    settings.curingStartLimitHours,
+  );
+  const late = stat("MISSING").drums;
+  const overdue = stat("TEST_OVERDUE").drums;
+  const waiting = stat("PASSED", "REQUISITION_RAISED");
+  const tiles = [
+    { label: `समय पर / On time today (${settings.curingStartLimitHours} h)`, value: onTime.pct == null ? "–" : fmtPct(onTime.pct), sub: onTime.pct == null ? "nothing due yet" : `${onTime.onTime} of ${onTime.due}`, href: "/office", bad: onTime.pct != null && onTime.pct < 100 },
+    { label: "देर / Late now", value: late, sub: "not in tank", href: `/drums${qs({ status: "MISSING" })}`, bad: late > 0 },
+    { label: "Test overdue", value: overdue, sub: "drums", href: `/drums${qs({ status: "TEST_OVERDUE" })}`, bad: overdue > 0 },
+    { label: "Polypark के लिए / For Polypark", value: fmtKm(waiting.m), sub: `${waiting.drums} passed, not sent`, href: "/transfers", bad: false },
+    { label: "Pass rate (30 d)", value: fmtPct(passRate(tests.map((t) => t.result))), sub: `${tests.length} first tests`, href: "/tests", bad: false },
+  ];
+  const openTotal = openStatuses.filter((s) => view === "all" || kindOf(s) === view).reduce((s, st) => s + stat(st).drums, 0);
 
-  const openEsc = new Map<string, { person: string; level: number; count: number }>();
-  for (const e of escalations) {
-    const person = e.alert?.person?.name ?? "Not assigned";
-    const row = openEsc.get(`${person}|${e.level}`) ?? { person, level: e.level, count: 0 };
-    row.count++;
-    openEsc.set(`${person}|${e.level}`, row);
-  }
-  const escRows = [...openEsc.values()].sort((a, b) => b.level - a.level || a.person.localeCompare(b.person));
-
-  const stale = !lastSync || hoursBetween(lastSync.startedAt, now) > settings.staleFeedHours;
-  const complianceHelp = `Drums whose curing started within ${settings.curingStartLimitHours} h of unload ÷ drums due (unloaded more than ${settings.curingStartLimitHours} h ago, curing items only, Data errors left out) × 100. By unload time. Drums with no unload time are left out and counted separately.`;
-  const passHelp = "Passed ÷ (passed + failed) × 100, counting hot set tests of the first curing cycle only, tested in the last 30 days.";
+  const heading = (text: string, n: number, dot: string) => (
+    <h2 className="mb-3 flex items-center gap-2.5 text-lg font-semibold text-slate-900">
+      <span className={`size-3 shrink-0 rounded-full ${dot}`} aria-hidden />
+      <Bi text={text} />
+      <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-sm font-semibold tabular-nums text-slate-700">{n}</span>
+    </h2>
+  );
 
   return (
-    <div className="space-y-4">
-      <PageHeader title="Overview" sub={`As of ${fmtDateTime(now)} IST`} />
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <h1 className="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
+          <Bi text={L.home} stack />
+        </h1>
+        <Tour />
+      </div>
 
-      {(stale || noTime > 0 || dataErrors > 0) && (
-        <Banner tone={stale || dataErrors > 0 ? "red" : "amber"}>
-          <ul className="space-y-1">
-            {stale && (
-              <li>
-                Drum feed is not up to date: {lastSync ? `last sync ${fmtDateTime(lastSync.startedAt)}, more than ${settings.staleFeedHours} h ago` : "no sync has run yet"}.
-              </li>
-            )}
-            {dataErrors > 0 && (
-              <li>
-                <Link href={`/tracker${qs({ tab: "data-error", line })}`} className="font-medium underline">
-                  {dataErrors} drum{dataErrors === 1 ? "" : "s"} with a Data error
-                </Link>{" "}
-                need a person to link them.
-              </li>
-            )}
-            {noTime > 0 && (
-              <li>
-                <Link href={drumsHref({ time: "unknown" })} className="font-medium underline">
-                  {noTime} drum{noTime === 1 ? "" : "s"} with no unload time
-                </Link>
-                : the {settings.curingStartLimitHours}-hour check cannot run on them.
-              </li>
-            )}
-          </ul>
-        </Banner>
-      )}
+      <section aria-label="Today in numbers" className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        {tiles.map((t) => (
+          <Link key={t.label} href={t.href} className={`block rounded-lg border bg-white p-3 hover:border-slate-400 focus-visible:outline-2 focus-visible:outline-blue-700 ${t.bad ? "border-red-300" : "border-slate-200"}`}>
+            <div className="text-xs font-medium text-slate-600"><Bi text={t.label} /></div>
+            <div className={`text-2xl font-bold tabular-nums ${t.bad ? "text-red-700" : "text-slate-900"}`}>{t.value}</div>
+            <div className="text-xs text-slate-600">{t.sub}</div>
+          </Link>
+        ))}
+        <Link href="/office" className="flex items-center justify-center rounded-lg border border-dashed border-slate-300 bg-white p-3 text-center text-sm font-medium text-blue-700 underline hover:border-slate-400 focus-visible:outline-2 focus-visible:outline-blue-700">
+          <Bi text="पूरा हिसाब / Office details" stack />
+        </Link>
+      </section>
 
-      <nav aria-label="Line" className="flex gap-1 overflow-x-auto">
-        {[{ code: undefined as string | undefined, name: "All lines" }, ...allLines].map((l) => (
+      <nav aria-label="Team" className="flex gap-2 overflow-x-auto pb-1">
+        {VIEWS.map((v) => (
           <Link
-            key={l.code ?? "all"}
-            href={`/${qs({ line: l.code })}`}
-            aria-current={l.code === line ? "page" : undefined}
-            className={`flex min-h-11 shrink-0 items-center rounded-md px-3 text-sm font-medium whitespace-nowrap focus-visible:outline-2 focus-visible:outline-blue-700 ${
-              l.code === line ? "bg-blue-50 text-blue-800" : "text-slate-700 hover:bg-slate-100"
+            key={v.view}
+            href={`/${qs({ view: v.view })}`}
+            aria-current={v.view === view ? "page" : undefined}
+            className={`flex min-h-12 shrink-0 items-center rounded-full border px-5 text-base font-semibold whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700 ${
+              v.view === view ? "border-blue-700 bg-blue-700 text-(--on-solid)" : "border-slate-300 bg-white text-slate-800 hover:bg-slate-100"
             }`}
           >
-            {l.name}
+            <Bi text={v.label} />
           </Link>
         ))}
       </nav>
 
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {tile("MISSING", "Missing now")}
-        {tile("IN_CURING", "In curing")}
-        {tile("AWAITING_TEST", "Awaiting test")}
-        {tile("TEST_OVERDUE", "Test overdue")}
-        {tile("FAILED", "Failed")}
-        {tile("PASSED", "Passed – ready to send")}
-        <KpiTile label="Sent today" value={sentToday._count._all} sub={fmtKm(sentToday._sum.lengthM ?? 0)} href={drumsHref({ status: "SENT", sent: "today" })} />
-        <KpiTile label="Sent this week" value={sentWeek._count._all} sub={fmtKm(sentWeek._sum.lengthM ?? 0)} href={drumsHref({ status: "SENT", sent: "week" })} />
-      </div>
+      {cards.length < openTotal && (
+        <p className="text-sm text-slate-600">
+          Showing {cards.length} of {openTotal} open drums (the oldest unloads first). <Link href="/drums" className="font-medium text-blue-700 underline">See all drums</Link>
+        </p>
+      )}
 
-      <Card title="Pipeline">
-        <div className="mb-3 flex h-3 overflow-hidden rounded-full bg-slate-100" aria-hidden>
-          {pipeline.map((p) => (
-            <div key={p.s} className={BAR[STATUS[p.s].tone]} style={{ flexGrow: p.drums }} />
-          ))}
-        </div>
-        <ol className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
-          {pipeline.map((p) => (
-            <li key={p.s}>
-              <Link href={drumsHref({ status: p.s })} className="block min-h-11 rounded-md border border-slate-200 p-2 hover:border-slate-400 focus-visible:outline-2 focus-visible:outline-blue-700">
-                <div className="flex items-center gap-1.5 text-xs font-medium text-slate-600">
-                  <span className={`size-2 shrink-0 rounded-full ${BAR[STATUS[p.s].tone]}`} aria-hidden />
-                  {p.label}
-                </div>
-                <div className="text-base font-semibold tabular-nums text-slate-900">{p.drums} drums</div>
-                <div className="text-xs tabular-nums text-slate-600">{fmtKm(p.m)}</div>
-              </Link>
-            </li>
-          ))}
-        </ol>
-      </Card>
-
-      <Card title="Missing drums now">
-        {missing.length === 0 ? (
-          <EmptyState>No missing drums right now</EmptyState>
-        ) : (
-          <div className="space-y-4">
-            {lines
-              .map((l) => ({ l, drums: missing.filter((d) => d.lineId === l.id) }))
-              .filter((g) => g.drums.length > 0)
-              .map(({ l, drums }) => (
-                <div key={l.id}>
-                  <h3 className="mb-1 text-sm font-medium text-slate-900">
-                    {l.name} · {drums.length} missing · {fmtKm(drums.reduce((s, d) => s + Number(d.lengthM), 0))}
-                  </h3>
-                  <ul className="space-y-2">
-                    {drums.map((d) => (
-                      <li key={d.id}>
-                        <Link href={`/drums/${d.id}`} className="block rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900 hover:border-red-400 focus-visible:outline-2 focus-visible:outline-blue-700">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <span className="font-semibold">Drum {d.drumNo} · {fmtM(d.lengthM)}</span>
-                            <Chip tone="red">Level {d.tracker?.escalationLevel ?? 0}</Chip>
-                          </div>
-                          <div>
-                            Unloaded {fmtDateTime(d.unloadedAt)} · <span className="font-semibold">{d.unloadedAt ? fmtDuration(hoursBetween(d.unloadedAt, now)) : "–"}</span> since unload
-                          </div>
-                          <div>Responsible: {responsibleNames}</div>
-                        </Link>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
+      {cards.length > 0 && red.length + amber.length === 0 && (
+        <div role="status" className="rounded-xl border border-green-300 bg-green-50 p-6 text-center text-green-900">
+          <div className="text-2xl font-bold">
+            <span aria-hidden>✓ </span>
+            {L.allOk}
           </div>
-        )}
-      </Card>
+          <p className="mt-1 text-base">अभी कोई काम देर से नहीं है। / Nothing is late or due soon right now.</p>
+        </div>
+      )}
 
-      <Card title={<span title={complianceHelp}>{settings.curingStartLimitHours}-hour compliance <span aria-hidden>ⓘ</span></span>}>
-        {lines.length === 0 ? (
-          <EmptyState>No lines are set up for curing checks</EmptyState>
-        ) : (
-          <Table>
-            <thead>
-              <tr>
-                <th>Line / shift</th>
-                <th>Today</th>
-                <th>Yesterday</th>
-              </tr>
-            </thead>
-            <tbody>
-              {lines.flatMap((l) => [
-                <tr key={l.id} className="font-medium">
-                  <td>{l.name}</td>
-                  {compCell(l.code, l.id, today)}
-                  {compCell(l.code, l.id, yesterday)}
-                </tr>,
-                ...shifts.map((s) => (
-                  <tr key={`${l.id}-${s.id}`}>
-                    <td className="pl-6 text-slate-600">{s.name}</td>
-                    {compCell(l.code, l.id, today, s.code)}
-                    {compCell(l.code, l.id, yesterday, s.code)}
-                  </tr>
-                )),
-              ])}
-            </tbody>
-          </Table>
-        )}
-      </Card>
-
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card title={<span title={passHelp}>Pass rate, last 30 days <span aria-hidden>ⓘ</span></span>}>
-          <Link href="/tests" className="block min-h-11 focus-visible:outline-2 focus-visible:outline-blue-700">
-            <div className="text-[28px] leading-8 font-semibold tabular-nums text-slate-900">{fmtPct(passRate(results))}</div>
-            <div className="text-xs text-slate-600">
-              {results.length === 0 ? "No first-cycle tests in the last 30 days" : `${passed} passed of ${results.length} first-cycle tests`}
-            </div>
-          </Link>
-        </Card>
-
-        <Card title="Open escalations">
-          {escRows.length === 0 ? (
-            <EmptyState>No open escalations</EmptyState>
-          ) : (
-            <Table>
-              <thead>
-                <tr>
-                  <th>Person</th>
-                  <th>Level</th>
-                  <th>Open</th>
-                </tr>
-              </thead>
-              <tbody>
-                {escRows.map((e) => (
-                  <tr key={`${e.person}|${e.level}`}>
-                    <td>{e.person}</td>
-                    <td className="tabular-nums">{e.level}</td>
-                    <td className="tabular-nums">
-                      <Link href="/alerts" className="inline-flex min-h-11 items-center font-medium text-blue-700 underline">{e.count}</Link>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
-          )}
-        </Card>
-      </div>
+      {red.length > 0 && (
+        <section>
+          {heading(L.actNow, red.length, "bg-red-600")}
+          <ul className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">{red.map(card)}</ul>
+        </section>
+      )}
+      {amber.length > 0 && (
+        <section>
+          {heading(L.dueSoon, amber.length, "bg-amber-500")}
+          <ul className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">{amber.map(card)}</ul>
+        </section>
+      )}
+      {green.length > 0 ? (
+        // Folded away so the urgent cards are not buried; opening it shows the drums that are on time.
+        <details className="rounded-xl border border-slate-200 bg-white">
+          <summary className="flex min-h-14 cursor-pointer items-center gap-2.5 px-4 text-lg font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-700">
+            <span className="size-3 shrink-0 rounded-full bg-green-600" aria-hidden />
+            <Bi text={L.allOk} /> <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-sm font-semibold tabular-nums text-slate-700">{green.length}</span>
+            <span className="ml-auto text-sm font-medium text-blue-700 underline">खोलें / Show</span>
+          </summary>
+          <div className="space-y-3 p-3">
+            <ul className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">{green.slice(0, GREEN_SHOWN).map(card)}</ul>
+            {green.length > GREEN_SHOWN && (
+              <p className="text-sm text-slate-600">
+                and {green.length - GREEN_SHOWN} more that are on time. <Link href="/drums" className="font-medium text-blue-700 underline">See all drums</Link>
+              </p>
+            )}
+          </div>
+        </details>
+      ) : (
+        cards.length === 0 && <EmptyState>कोई खुला ड्रम नहीं / No open drums for this team</EmptyState>
+      )}
     </div>
   );
 }

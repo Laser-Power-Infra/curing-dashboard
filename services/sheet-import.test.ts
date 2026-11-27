@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { collapseSamples, parseCsv, sheetDate, sheetNumber, sheetTime, toRecords } from "./sheet-import";
+import { checkEntry, collapseSamples, parseCsv, sheetDate, sheetNumber, sheetTime, toRecords } from "./sheet-import";
 
 test("parseCsv – quoted commas, doubled quotes, newlines in a cell", () => {
   expect(parseCsv('a,"6,030","say ""hi""","two\nlines"\r\nb,,\n')).toEqual([["a", "6,030", 'say "hi"', "two\nlines"], ["b", "", ""]]);
@@ -37,4 +37,15 @@ test("collapseSamples – the sheet's Test Result rule", () => {
   // Nothing measured → no result.
   expect(collapseSamples([s("1", "A", "Incomplete")], "1", "A").result).toBeNull();
   expect(collapseSamples([s("2", "A", "Pass")], "1", "A")).toEqual({ used: [], result: null });
+});
+
+test("checkEntry – entered result against the limits (hot set 175 %, permanent set 15 %)", () => {
+  expect(checkEntry("FAIL", 65.3, 9.5)).toBe(true); // within limits but marked Fail
+  expect(checkEntry("FAIL", 84.65, 36.3)).toBe(false); // a real fail
+  expect(checkEntry("FAIL", 65.3, null)).toBe(false); // a value is missing: nothing to compare
+  expect(checkEntry("PASS", 107.8, 10.15)).toBe(false);
+  expect(checkEntry("PASS", 175, 15)).toBe(false); // the limit itself passes
+  expect(checkEntry("PASS", 175.1, null)).toBe(true);
+  expect(checkEntry("PASS", null, 15.5)).toBe(true);
+  expect(checkEntry("PASS", null, null)).toBe(false);
 });

@@ -29,7 +29,7 @@ import { parseDateOnly, parseIstInput } from "@/lib/format";
 import { drumSync, type JobResult } from "@/services/jobs";
 import { runAll } from "@/services/rules/run";
 import { readTab } from "@/services/google-sheets";
-import { collapseSamples, parseCsv, sheetDate, sheetNumber, sheetTime, toRecords } from "@/services/sheet-import";
+import { HISTORICAL, collapseSamples, parseCsv, sheetDate, sheetNumber, sheetTime, toRecords } from "@/services/sheet-import";
 
 const BY = "import";
 // Set at the start of each run by sheetSync.
@@ -176,6 +176,8 @@ async function curingLog() {
     };
     const old = have.get(k);
     if (!old) { fresh.push({ ...data, source: "IMPORT" as const, createdBy: BY }); continue; }
+    // Closed by scripts/close-historical.ts: the sheet has neither that sent date nor the note, and must not undo them.
+    if (old.remarks?.includes(HISTORICAL)) { data.remarks = old.remarks; data.sentDate ??= old.sentDate; }
     const diff = changes(old, data);
     if (!diff) continue;
     if (!dryRun) await prisma.curingLog.update({ where: { id: old.id }, data: { ...diff, updatedBy: BY } });

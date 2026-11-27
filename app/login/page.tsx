@@ -31,7 +31,7 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
             Password
             <input name="password" type="password" required minLength={8} maxLength={200} autoComplete="current-password" className={input} />
           </label>
-          <button formAction={logIn} className="min-h-11 w-full rounded-md bg-blue-700 px-4 text-sm font-medium text-white hover:bg-blue-800">
+          <button formAction={logIn} className="min-h-11 w-full rounded-md bg-blue-700 px-4 text-sm font-medium text-(--on-solid) hover:bg-blue-800">
             Sign in
           </button>
           <button formAction={signUp} className="min-h-11 w-full rounded-md border border-slate-300 px-4 text-sm font-medium text-slate-800 hover:bg-slate-100">

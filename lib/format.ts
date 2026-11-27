@@ -87,3 +87,10 @@ export function parseDateOnly(s: string | null | undefined): Date | null {
 
 /** The instant an IST calendar day (a @db.Date value) starts. */
 export const istDayStart = (day: Date) => new Date(day.getTime() - IST_OFFSET_MS);
+
+/** Item name → short size tag: "300 SQ. MM. CORE INSULATED 33kv (SIO/GENERAL)" → "300 sq mm · 33 kV". "" when the name has neither. */
+export function sizeTag(itemName: string | null | undefined): string {
+  const sq = itemName?.match(/(\d+(?:\.\d+)?)\s*SQ\.?\s*MM/i)?.[1];
+  const kv = itemName?.match(/(\d+(?:\.\d+)?)\s*KV/i)?.[1];
+  return [sq && `${sq} sq mm`, kv && `${kv} kV`].filter(Boolean).join(" · ");
+}

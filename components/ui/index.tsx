@@ -1,6 +1,8 @@
 // Small shared component set (guide 8). Server-safe: no hooks here. Client pieces live in ./client.tsx.
 import Link from "next/link";
 import type { ComponentProps, ReactNode } from "react";
+import { sizeTag } from "@/lib/format";
+import { L } from "@/lib/labels";
 
 const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(" ");
 
@@ -68,9 +70,9 @@ export function StatusChip({ status }: { status: string | null | undefined }) {
 
 // --- Buttons: 44 px tap targets (guide 7) -----------------------------------------------------
 const BTN = {
-  primary: "bg-blue-700 text-white hover:bg-blue-800",
+  primary: "bg-blue-700 text-(--on-solid) hover:bg-blue-800",
   secondary: "border border-slate-300 bg-white text-slate-800 hover:bg-slate-50",
-  danger: "bg-red-700 text-white hover:bg-red-800",
+  danger: "bg-red-700 text-(--on-solid) hover:bg-red-800",
 };
 export const btnClass = (variant: keyof typeof BTN = "primary") =>
   cx(
@@ -157,4 +159,39 @@ export function Select({ className, ...p }: ComponentProps<"select">) {
 }
 export function Textarea({ className, ...p }: ComponentProps<"textarea">) {
   return <textarea rows={2} {...p} className={cx(inputClass, "py-2", className)} />;
+}
+
+// --- Who the drum is for and what it is (Party, item code, item name, size) ---------------------
+/** Pass the linked drum (with `product` selected for the item code), or null for a row not linked to a drum. */
+export function DrumInfo({ drum, compact }: { drum: { party: string | null; coreItem: string; product?: { code: string | null } | null } | null | undefined; compact?: boolean }) {
+  if (!drum) return <span className="text-slate-500">{L.notLinked}</span>;
+  const size = sizeTag(drum.coreItem);
+  return (
+    <div className={`text-sm leading-5 ${compact ? "" : "min-w-40"}`}>
+      <div className="font-medium text-slate-900">{drum.party ?? "Party not given"}</div>
+      <div className="text-slate-700">{drum.coreItem}</div>
+      <div className={`mt-0.5 flex flex-wrap items-center gap-1 text-xs text-slate-600 ${compact ? "justify-end" : ""}`}>
+        {drum.product?.code && <span>{drum.product.code}</span>}
+        {size && <Chip tone="blue">{size}</Chip>}
+      </div>
+    </div>
+  );
+}
+
+// --- Bilingual text: "हिंदी / English" from lib/labels.ts, Hindi first and English beside or under it ---
+/** `stack` puts English on its own smaller line (headings, big buttons); otherwise it follows inline, lighter. */
+export function Bi({ text, stack }: { text: string; stack?: boolean }) {
+  const [hi, en] = text.split(" / ");
+  // Only a Hindi-first label is split; "Lab / Test" or "hold / re-cure" is plain text.
+  if (!en || !/[ऀ-ॿ]/.test(hi)) return <>{text}</>;
+  return stack ? (
+    <span className="inline-flex flex-col leading-tight">
+      <span>{hi}</span>
+      <span className="text-[0.7em] font-medium opacity-80">{en}</span>
+    </span>
+  ) : (
+    <span>
+      {hi} <span className="font-medium opacity-75">· {en}</span>
+    </span>
+  );
 }

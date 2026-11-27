@@ -4,10 +4,11 @@ import { prisma } from "@/lib/prisma";
 import { viewer, signOut } from "@/lib/auth";
 import { getSettings } from "@/lib/settings";
 import { fmtDateOnly, fmtDateTime } from "@/lib/format";
-import { NavLinks } from "@/components/ui/client";
+import { NavLinks, ThemeToggle } from "@/components/ui/client";
 
 const NAV = [
-  { href: "/", label: "Overview" },
+  { href: "/", label: "Home" },
+  { href: "/office", label: "Office" },
   { href: "/tracker", label: "Missing drums" },
   { href: "/curing", label: "Curing log" },
   { href: "/tests", label: "Hot set test" },
@@ -23,7 +24,7 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
   const user = await viewer();
   const [settings, lastSync, latestDrum] = await Promise.all([
     getSettings(),
-    prisma.jobRun.findFirst({ where: { job: "W1_DRUM_SYNC", status: "SUCCESS" }, orderBy: { startedAt: "desc" } }),
+    prisma.jobRun.findFirst({ where: { job: { in: ["SHEET_SYNC", "W1_DRUM_SYNC"] }, status: "SUCCESS" }, orderBy: { startedAt: "desc" } }),
     prisma.drum.findFirst({ orderBy: [{ unloadDate: "desc" }, { unloadedAt: "desc" }] }),
   ]);
 
@@ -43,6 +44,7 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
             <div>Last sync {lastSync ? `${fmtDateTime(lastSync.startedAt)} IST` : "never"}</div>
             <div>Latest drum {latestDrum ? (latestDrum.unloadedAt ? fmtDateTime(latestDrum.unloadedAt) : fmtDateOnly(latestDrum.unloadDate)) : "none"}</div>
           </div>
+          <ThemeToggle />
           {user.email ? (
             <form action={async () => { "use server"; await signOut({ redirectTo: "/" }); }}>
               <button className="min-h-11 rounded-md px-2 text-xs text-slate-700 hover:bg-slate-100" title={user.email}>
@@ -64,7 +66,7 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
         <nav aria-label="Main" className="hidden w-48 shrink-0 flex-col gap-1 overflow-y-auto border-r border-slate-200 bg-white p-2 md:flex">
           <NavLinks items={NAV} />
         </nav>
-        <main id="main" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4 pb-20 md:p-6 print:overflow-visible">{children}</main>
+        <main id="main" className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4 pb-20 md:p-6 print:overflow-visible">{children}</main>
       </div>
 
       <nav aria-label="Main" className="fixed inset-x-0 bottom-0 z-30 flex gap-1 overflow-x-auto border-t border-slate-200 bg-white p-1 md:hidden">

@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { viewer } from "@/lib/auth";
 import { fmtDateTime, fmtKm, fmtM } from "@/lib/format";
-import { LinkButton, StatusChip } from "@/components/ui";
+import { DrumInfo, LinkButton, StatusChip } from "@/components/ui";
 import { PrintButton } from "@/components/transfers/print-button";
 
 export default async function RequisitionPage({ params }: { params: Promise<{ id: string }> }) {
@@ -11,7 +11,7 @@ export default async function RequisitionPage({ params }: { params: Promise<{ id
   const { id } = await params;
   const req = await prisma.requisition.findUnique({
     where: { id },
-    include: { curingLogs: { include: { drum: { include: { line: true } } }, orderBy: { coreDrumNo: "asc" } } },
+    include: { curingLogs: { include: { drum: { include: { line: true, product: { select: { code: true } } } } }, orderBy: { coreDrumNo: "asc" } } },
   });
   if (!req) notFound();
 
@@ -41,7 +41,7 @@ export default async function RequisitionPage({ params }: { params: Promise<{ id
         <div className="overflow-x-auto">
           <table className="w-full border-collapse text-sm [&_td]:border [&_td]:border-slate-300 [&_td]:px-2 [&_td]:py-1.5 [&_th]:border [&_th]:border-slate-300 [&_th]:bg-slate-50 [&_th]:px-2 [&_th]:py-1.5 [&_th]:text-left">
             <thead>
-              <tr><th>#</th><th>Lot no</th><th>Drum no</th><th>Line</th><th>Item</th><th className="text-right">Length</th></tr>
+              <tr><th>#</th><th>Lot no</th><th>Drum no</th><th>Line</th><th>Party / Item</th><th className="text-right">Length</th></tr>
             </thead>
             <tbody>
               {req.curingLogs.map((l, i) => (
@@ -50,7 +50,11 @@ export default async function RequisitionPage({ params }: { params: Promise<{ id
                   <td>{l.lotNo ?? "–"}</td>
                   <td className="font-medium">{l.coreDrumNo}</td>
                   <td>{l.drum?.line.name ?? "–"}</td>
-                  <td>{l.productName ?? l.drum?.coreItem ?? "–"}</td>
+                  <td>
+                    <DrumInfo drum={l.drum} />
+                    {/* Not linked to a drum: the item typed on the curing row is still known. */}
+                    {!l.drum && l.productName && <div>{l.productName}</div>}
+                  </td>
                   <td className="text-right tabular-nums">{fmtM(l.lengthM ?? l.drum?.lengthM)}</td>
                 </tr>
               ))}

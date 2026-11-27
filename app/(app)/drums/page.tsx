@@ -8,6 +8,7 @@ import { fmtDateOnly, fmtDateTime, fmtM, parseDateOnly } from "@/lib/format";
 import { Button, Chip, Field, PageHeader, STATUS, Select, StatusChip, Table } from "@/components/ui";
 import { one, sentSince } from "@/components/drums/shared";
 import { PAGE_SIZE, facets, many, pageOf, type SP } from "@/lib/table";
+import { Item } from "./item";
 
 export default async function DrumsPage({ searchParams }: { searchParams: Promise<SP> }) {
   await viewer();
@@ -35,6 +36,8 @@ export default async function DrumsPage({ searchParams }: { searchParams: Promis
       OR: [
         { drumNo: { contains: q, mode: "insensitive" } },
         { gridEntryId: { contains: q, mode: "insensitive" } },
+        { party: { contains: q, mode: "insensitive" } },
+        { coreItem: { contains: q, mode: "insensitive" } },
         { curingLogs: { some: { lotNo: { contains: q, mode: "insensitive" } } } },
       ],
     }),
@@ -44,6 +47,7 @@ export default async function DrumsPage({ searchParams }: { searchParams: Promis
     sp,
     {
       drumNo: { header: "Drum no" },
+      party: { header: "Party" },
       coreItem: { header: "Item" },
       status: { header: "Status", label: (v) => STATUS[v]?.label ?? v, values: Object.keys(DrumStatus) },
     },
@@ -59,7 +63,7 @@ export default async function DrumsPage({ searchParams }: { searchParams: Promis
       orderBy: [{ unloadDate: "desc" }, { unloadedAt: { sort: "desc", nulls: "last" } }, { id: "asc" }],
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
-      include: { line: true, curingLogs: { orderBy: { cycleNo: "desc" }, take: 1, select: { lotNo: true } } },
+      include: { line: true, product: { select: { code: true } }, curingLogs: { orderBy: { cycleNo: "desc" }, take: 1, select: { lotNo: true } } },
     }),
   ]);
 
@@ -96,6 +100,7 @@ export default async function DrumsPage({ searchParams }: { searchParams: Promis
               <th>Grid ID</th>
               <th>Line</th>
               <th>Drum no</th>
+              <th>Party</th>
               <th>Item</th>
               <th>Length</th>
               <th>Unloaded</th>
@@ -113,7 +118,8 @@ export default async function DrumsPage({ searchParams }: { searchParams: Promis
                     {d.drumNo}
                   </Link>
                 </td>
-                <td>{d.coreItem}</td>
+                <td>{d.party ?? "–"}</td>
+                <td><Item name={d.coreItem} code={d.product?.code} /></td>
                 <td className="whitespace-nowrap tabular-nums">{fmtM(d.lengthM)}</td>
                 <td className="whitespace-nowrap">
                   {d.unloadedAt ? fmtDateTime(d.unloadedAt) : <>{fmtDateOnly(d.unloadDate)} <Chip>time unknown</Chip></>}

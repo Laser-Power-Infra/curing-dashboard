@@ -2,7 +2,8 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { can, viewer } from "@/lib/auth";
 import { fmtDateTime, fmtDuration, istDayStart, parseDateOnly } from "@/lib/format";
-import { Button, Field, Input, LinkButton, PageHeader, STATUS, Select, StatusChip, Table } from "@/components/ui";
+import { Item } from "../drums/item";
+import { Button, DrumInfo, Field, Input, LinkButton, PageHeader, STATUS, Select, StatusChip, Table } from "@/components/ui";
 import { PAGE_SIZE, facets, pageOf, searchOf } from "@/lib/table";
 import { DrumStatus, TestResult, TimeCheck } from "@/generated/prisma/enums";
 import type { Prisma } from "@/generated/prisma/client";
@@ -26,7 +27,11 @@ export default async function CuringPage({ searchParams }: { searchParams: Promi
       gte: from ? istDayStart(from) : undefined,
       lt: to ? new Date(istDayStart(to).getTime() + 86_400_000) : undefined,
     };
-  if (q) base.OR = (["lotNo", "coreDrumNo", "xlpeCompound", "productName", "chamberTankText"] as const).map((k) => ({ [k]: { contains: q, mode: "insensitive" } }));
+  if (q)
+    base.OR = [
+      ...(["lotNo", "coreDrumNo", "xlpeCompound", "productName", "chamberTankText"] as const).map((k) => ({ [k]: { contains: q, mode: "insensitive" } })),
+      ...(["party", "coreItem"] as const).map((k) => ({ drum: { [k]: { contains: q, mode: "insensitive" } } })),
+    ];
 
   const label = (v: string) => STATUS[v]?.label ?? v;
   const head = await facets(
@@ -34,20 +39,26 @@ export default async function CuringPage({ searchParams }: { searchParams: Promi
     {
       lotNo: { header: "Lot no" },
       coreDrumNo: { header: "Drum no" },
+      party: { header: "Party", on: "drum" },
+      productName: { header: "Item" },
       cycleNo: { header: "Cycle", int: true },
       xlpeCompound: { header: "Compound" },
       timeCheck: { header: "Time check", label, values: Object.keys(TimeCheck) },
       testResult: { header: "Result", label, values: Object.keys(TestResult) },
       lotStatus: { header: "Status", param: "status", label, values: Object.keys(DrumStatus) },
     },
-    async (field, others) => (await prisma.curingLog.groupBy({ by: [field], where: { AND: [base, ...(others as Prisma.CuringLogWhereInput[])] }, _count: { _all: true } })).map((g) => ({ value: g[field], count: g._count._all })),
+    async (field, others) =>
+      field === "party"
+        ? // shortcut: Party is the drum's, so this counts drums, not rows (a re-cured drum counts once); count rows if that matters.
+          (await prisma.drum.groupBy({ by: ["party"], where: { curingLogs: { some: { AND: [base, ...(others as Prisma.CuringLogWhereInput[])] } } }, _count: { _all: true } })).map((g) => ({ value: g.party, count: g._count._all }))
+        : (await prisma.curingLog.groupBy({ by: [field], where: { AND: [base, ...(others as Prisma.CuringLogWhereInput[])] }, _count: { _all: true } })).map((g) => ({ value: g[field], count: g._count._all })),
   );
   const where: Prisma.CuringLogWhereInput = { AND: [base, ...(head.where as Prisma.CuringLogWhereInput[])] };
 
   const [lines, total, rows] = await Promise.all([
     prisma.line.findMany({ where: { inScope: true }, orderBy: { name: "asc" } }),
     prisma.curingLog.count({ where }),
-    prisma.curingLog.findMany({ where, include: { curingUnit: true }, orderBy: { curingStartAt: "desc" }, skip: (page - 1) * PAGE_SIZE, take: PAGE_SIZE }),
+    prisma.curingLog.findMany({ where, include: { curingUnit: true, product: { select: { code: true } }, drum: { select: { party: true, coreItem: true, product: { select: { code: true } } } } }, orderBy: { curingStartAt: "desc" }, skip: (page - 1) * PAGE_SIZE, take: PAGE_SIZE }),
   ]);
   return (
     <>
@@ -77,7 +88,7 @@ export default async function CuringPage({ searchParams }: { searchParams: Promi
       <Table server={{ total, page, pageSize: PAGE_SIZE, q, filters: head.filters }}>
           <thead>
             <tr>
-              <th>Lot no</th><th>Drum no</th><th>Cycle</th><th>Tank</th><th>Compound</th><th>Start</th><th>End</th>
+              <th>Lot no</th><th>Drum no</th><th>Party</th><th>Item</th><th>Cycle</th><th>Tank</th><th>Compound</th><th>Start</th><th>End</th>
               <th>Planned / actual</th><th>Deviation</th><th>Time check</th><th>Test due</th><th>Result</th><th>Status</th><th></th>
             </tr>
           </thead>
@@ -88,6 +99,8 @@ export default async function CuringPage({ searchParams }: { searchParams: Promi
                 <td>
                   {r.drumId ? <Link href={`/drums/${r.drumId}`} className="font-medium text-blue-700 underline">{r.coreDrumNo}</Link> : r.coreDrumNo}
                 </td>
+                <td>{r.drum ? (r.drum.party ?? "–") : <DrumInfo drum={null} />}</td>
+                <td><Item name={r.productName ?? r.drum?.coreItem} code={(r.product ?? r.drum?.product)?.code} /></td>
                 <td>{r.cycleNo}</td>
                 <td className="whitespace-nowrap">{r.curingUnit?.name ?? r.chamberTankText ?? "–"}</td>
                 <td>{r.xlpeCompound ?? "–"}</td>

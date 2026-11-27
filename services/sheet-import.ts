@@ -78,3 +78,20 @@ export function collapseSamples<T extends Sample>(all: T[], lot: string, drum: s
   const res = used.map((s) => s.result.toLowerCase());
   return { used, result: res.includes("fail") ? "FAIL" : res.includes("pass") ? "PASS" : null };
 }
+
+/** The lab's limits, as written in the sheet's column headers. */
+export const HOT_SET_MAX_PCT = 175;
+export const PERMANENT_SET_MAX_PCT = 15;
+
+/**
+ * True when the entered result disagrees with the readings: a Fail with both values within the limits,
+ * or a Pass with a value over a limit. It only raises a "Check entry" flag – the entered result stays (rule 5.6).
+ * A Fail with a value missing is not flagged: there is nothing to compare.
+ */
+export function checkEntry(result: "PASS" | "FAIL", hotSetPct: number | null, permanentSetPct: number | null): boolean {
+  const over = (hotSetPct != null && hotSetPct > HOT_SET_MAX_PCT) || (permanentSetPct != null && permanentSetPct > PERMANENT_SET_MAX_PCT);
+  return result === "PASS" ? over : hotSetPct != null && permanentSetPct != null && !over;
+}
+
+/** Marks a curing row closed by scripts/close-historical.ts. The sheet sync keeps such a row's sent date and remarks. */
+export const HISTORICAL = "historical –";

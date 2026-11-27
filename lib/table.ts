@@ -14,7 +14,14 @@ export type Facet = { param: string; picked: string[]; options: { value: string;
 /** What the Table needs to draw the search box, the header filters and the pager. `q: null` = no search box. */
 export type ServerTable = { total: number; page: number; pageSize: number; q: string | null; filters: Record<string, Facet> };
 
-type Column = { header: string; param?: string; int?: boolean; label?: (value: string) => string; /** enum columns: the values the database accepts */ values?: readonly string[] };
+type Column = {
+  header: string;
+  param?: string;
+  int?: boolean;
+  label?: (value: string) => string;
+  /** enum columns: the values the database accepts */ values?: readonly string[];
+  /** the field is on this relation of the listed table (e.g. "drum" for a drum's party on a curing row) */ on?: string;
+};
 
 /**
  * Column-header filters for one list, as facets. `columns` maps a database field to its column header.
@@ -32,7 +39,9 @@ export async function facets<F extends string>(sp: SP, columns: Record<F, Column
   const conditions = fields.map((field, i) => {
     const values = picked[i].filter((v) => v !== BLANK).map((v) => (columns[field].int ? Number(v) : v));
     const parts = [...(values.length ? [{ [field]: { in: values } }] : []), ...(picked[i].includes(BLANK) ? [{ [field]: null }] : [])];
-    return parts.length > 1 ? { OR: parts } : parts[0];
+    const cond = parts.length > 1 ? { OR: parts } : parts[0];
+    const on = columns[field].on;
+    return cond && on ? { [on]: cond } : cond;
   });
   const groups = await Promise.all(fields.map((field, i) => group(field, conditions.filter((c, j) => c && j !== i) as object[])));
   const filters: Record<string, Facet> = {};

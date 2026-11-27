@@ -3,13 +3,15 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { can, isStaff, viewer } from "@/lib/auth";
 import { getSettings } from "@/lib/settings";
-import { fmtDateOnly, fmtDateTime, fmtDuration, fmtM, hoursBetween } from "@/lib/format";
+import { fmtDateOnly, fmtDateTime, fmtDuration, fmtM, hoursBetween, sizeTag } from "@/lib/format";
 import { Card, Chip, EmptyState, Field, PageHeader, Select, StatusChip, Table } from "@/components/ui";
 import { SubmitButton } from "@/components/ui/client";
 import { TrackerEdit } from "@/components/tracker/edit";
 import { REASONS, mayEditTracker, trackId, type TrackerField } from "@/lib/tracker";
 import { linkCuringRow, setCuringItem } from "@/actions/drums";
 import { ConfirmForm } from "@/components/drums/confirm-form";
+import { nextAction } from "@/lib/next-action";
+import { StepBar } from "@/components/home/step-bar";
 
 const show = (v: unknown) => (v == null ? "–" : typeof v === "string" ? v : JSON.stringify(v));
 
@@ -21,6 +23,7 @@ export default async function DrumPage({ params }: { params: Promise<{ id: strin
       where: { id },
       include: {
         line: true,
+        product: { select: { code: true } },
         tracker: { include: { curingLog: { select: { lotNo: true, cycleNo: true } } } },
         curingLogs: { orderBy: { cycleNo: "asc" }, include: { curingUnit: true, requisition: true, hotSetTests: { orderBy: { testedAt: "asc" } } } },
       },
@@ -86,6 +89,22 @@ export default async function DrumPage({ params }: { params: Promise<{ id: strin
     { name: "Requisition", at: latest?.requisition?.raisedAt, who: latest?.requisition?.raisedBy, note: latest?.requisition?.reqNo },
     { name: "Sent", at: latest?.sentDate },
   ];
+  // Same journey bar as the home cards.
+  const journey = nextAction(
+    drum,
+    latest
+      ? {
+          curingStartAt: latest.curingStartAt,
+          curingEndAt: latest.curingEndAt,
+          plannedCuringHrs: latest.plannedCuringHrs == null ? null : Number(latest.plannedCuringHrs),
+          testDueAt: latest.testDueAt,
+          testedAt: lastTest?.testedAt ?? null,
+          requisitionRaisedAt: latest.requisition?.raisedAt ?? null,
+        }
+      : null,
+    new Date(),
+    settings,
+  );
   let prev = null as Date | null;
   const timeline = steps.map((s) => {
     const took = s.at && prev ? hoursBetween(prev, s.at) : null;
@@ -124,7 +143,10 @@ export default async function DrumPage({ params }: { params: Promise<{ id: strin
 
       <Card>
         <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+          <div><dt className="text-xs text-slate-600">Party</dt><dd>{drum.party ?? "Party not given"}</dd></div>
           <div><dt className="text-xs text-slate-600">Item</dt><dd>{drum.coreItem}</dd></div>
+          <div><dt className="text-xs text-slate-600">Item code</dt><dd>{drum.product?.code ?? "–"}</dd></div>
+          <div><dt className="text-xs text-slate-600">Size</dt><dd>{sizeTag(drum.coreItem) ? <Chip tone="blue">{sizeTag(drum.coreItem)}</Chip> : "–"}</dd></div>
           <div><dt className="text-xs text-slate-600">Length</dt><dd className="tabular-nums">{fmtM(drum.lengthM)}</dd></div>
           <div><dt className="text-xs text-slate-600">Prod orders</dt><dd>{drum.prodOrders.join(", ") || "–"}</dd></div>
           <div><dt className="text-xs text-slate-600">Drum size</dt><dd>{drum.drumSize ?? "–"}</dd></div>
@@ -132,6 +154,9 @@ export default async function DrumPage({ params }: { params: Promise<{ id: strin
       </Card>
 
       <Card title={`Timeline${latest && latest.cycleNo > 1 ? ` – curing cycle ${latest.cycleNo}` : ""}`}>
+        <div className="mb-4">
+          <StepBar current={journey.step} late={journey.tone === "red" ? journey.step : null} />
+        </div>
         <ol className="space-y-3">
           {timeline.map((s) => (
             <li key={s.name} className={`border-l-4 pl-3 text-sm ${s.breach ? "border-red-600" : s.at ? "border-green-600" : "border-slate-200"}`}>

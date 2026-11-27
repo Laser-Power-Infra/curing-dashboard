@@ -6,7 +6,8 @@ import { viewer } from "@/lib/auth";
 import { fmtDateOnly, fmtDateTime, fmtDuration, fmtM, hoursBetween, parseDateOnly } from "@/lib/format";
 import { Button, Chip, Field, Input, PageHeader, Select, StatusChip, Table } from "@/components/ui";
 import { one, qs } from "@/components/drums/shared";
-import { PAGE_SIZE, pageOf, searchOf, type SP } from "@/lib/table";
+import { PAGE_SIZE, facets, pageOf, searchOf, type SP } from "@/lib/table";
+import { Item } from "../drums/item";
 import { TrackerEdit } from "@/components/tracker/edit";
 import { REASONS, mayEditTracker, trackId, type TrackerField } from "@/lib/tracker";
 
@@ -48,23 +49,32 @@ export default async function TrackerPage({ searchParams }: { searchParams: Prom
         { drum: { drumNo: { contains: q, mode: "insensitive" } } },
         { drum: { gridEntryId: { contains: q, mode: "insensitive" } } },
         { drum: { coreItem: { contains: q, mode: "insensitive" } } },
+        { drum: { party: { contains: q, mode: "insensitive" } } },
         { remarks: { contains: q, mode: "insensitive" } },
         { mdRemarks: { contains: q, mode: "insensitive" } },
       ],
     }),
   };
-  const where = { ...base, ...tab.where };
+  // Party and Item are the drum's. A drum has at most one tracker row, so counting drums counts rows.
+  const head = await facets(
+    sp,
+    { party: { header: "Party", on: "drum" }, coreItem: { header: "Item", on: "drum" } },
+    async (field, others) =>
+      (await prisma.drum.groupBy({ by: [field], where: { tracker: { is: { AND: [base, tab.where, ...(others as Prisma.MissingDrumTrackerWhereInput[])] } } }, _count: { _all: true } })).map((g) => ({ value: g[field], count: g._count._all })),
+  );
+  const whereOf = (t: Prisma.MissingDrumTrackerWhereInput): Prisma.MissingDrumTrackerWhereInput => ({ AND: [base, t, ...(head.where as Prisma.MissingDrumTrackerWhereInput[])] });
+  const where = whereOf(tab.where);
 
   const [lines, counts, rows] = await Promise.all([
     prisma.line.findMany({ where: { inScope: true }, orderBy: { name: "asc" } }),
-    Promise.all(TABS.map((t) => prisma.missingDrumTracker.count({ where: { ...base, ...t.where } }))),
+    Promise.all(TABS.map((t) => prisma.missingDrumTracker.count({ where: whereOf(t.where) }))),
     prisma.missingDrumTracker.findMany({
       where,
       // Open rows: most overdue first.
       orderBy: tab.key === "open" ? [{ drum: { unloadedAt: "asc" } }, { trackNo: "asc" }] : { trackNo: "desc" },
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
-      include: { drum: { include: { line: true } }, curingLog: { select: { lotNo: true, cycleNo: true } } },
+      include: { drum: { include: { line: true, product: { select: { code: true } } } }, curingLog: { select: { lotNo: true, cycleNo: true } } },
     }),
   ]);
   const total = counts[TABS.indexOf(tab)];
@@ -126,13 +136,14 @@ export default async function TrackerPage({ searchParams }: { searchParams: Prom
         <Button type="submit" variant="secondary">Show</Button>
       </form>
 
-      <Table server={{ total, page, pageSize: PAGE_SIZE, q, filters: {} }}>
+      <Table server={{ total, page, pageSize: PAGE_SIZE, q, filters: head.filters }}>
           <thead>
             <tr>
               <th>Track ID</th>
               <th>Grid ID</th>
               <th>Line</th>
               <th>Drum no</th>
+              <th>Party</th>
               <th>Item</th>
               <th>Prod order</th>
               <th>Length</th>
@@ -161,7 +172,8 @@ export default async function TrackerPage({ searchParams }: { searchParams: Prom
                 <td>{r.drum.gridEntryId}</td>
                 <td className="whitespace-nowrap">{r.drum.line.name}</td>
                 <td className="font-medium">{r.drum.drumNo}</td>
-                <td>{r.drum.coreItem}</td>
+                <td>{r.drum.party ?? "–"}</td>
+                <td><Item name={r.drum.coreItem} code={r.drum.product?.code} /></td>
                 <td>{r.drum.prodOrders.join(", ") || "–"}</td>
                 <td className="whitespace-nowrap tabular-nums">{fmtM(r.drum.lengthM)}</td>
                 <td className="whitespace-nowrap">{r.drum.unloadedAt ? fmtDateTime(r.drum.unloadedAt) : fmtDateOnly(r.drum.unloadDate)}</td>

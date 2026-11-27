@@ -3,8 +3,9 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { can, viewer } from "@/lib/auth";
 import { getSettings } from "@/lib/settings";
-import { fmtDateTime, fmtDuration, fmtKm, fmtM, hoursBetween } from "@/lib/format";
-import { Card, Chip, EmptyState, LinkButton, PageHeader, StatusChip, Table, type Tone } from "@/components/ui";
+import { logScope } from "@/lib/scope";
+import { fmtDate, fmtDateTime, fmtDuration, fmtKm, fmtM, hoursBetween } from "@/lib/format";
+import { Card, Chip, DrumInfo, EmptyState, LinkButton, PageHeader, StatusChip, Table, type Tone } from "@/components/ui";
 import { ActionForm } from "@/components/action-form";
 import { cancelRequisition, markDispatched, raiseRequisition } from "@/actions/transfers";
 
@@ -14,21 +15,25 @@ export default async function TransfersPage({ searchParams }: { searchParams: Pr
   const [user, settings, sp] = await Promise.all([viewer(), getSettings(), searchParams]);
   const mayTransfer = can(user, "transfer");
   const now = new Date();
-  const drum = { include: { line: true } } as const;
+  // Same drums as the Overview: in-scope curing items (lib/scope.ts), latest curing cycle only.
+  const scope = logScope();
+  const drum = { include: { line: true, product: { select: { code: true } }, curingLogs: { select: { cycleNo: true } } } } as const;
+  const latest = (r: { cycleNo: number; drum: { curingLogs: { cycleNo: number }[] } | null }) => !r.drum?.curingLogs.some((c) => c.cycleNo > r.cycleNo);
 
-  const [passed, failed, open, dispatched] = await Promise.all([
+  const [passedAll, failed, open, sent] = await Promise.all([
     // shortcut: the whole ready list is loaded and sorted here because "passed at" lives on the test row; page it if it ever grows past a few hundred drums.
     prisma.curingLog.findMany({
-      where: { testResult: "PASS", sentDate: null, requisitionId: null },
+      where: { ...scope, testResult: "PASS", sentDate: null, requisitionId: null },
       include: { drum, hotSetTests: { where: { result: "PASS" }, orderBy: { testedAt: "desc" }, take: 1 } },
     }),
     prisma.curingLog.findMany({
-      where: { testResult: "FAIL", sentDate: null },
-      include: { drum: { include: { line: true, curingLogs: { select: { cycleNo: true } } } } },
+      where: { ...scope, testResult: "FAIL", sentDate: null },
+      include: { drum },
       orderBy: { curingStartAt: "asc" },
     }),
     prisma.requisition.findMany({ where: { status: "RAISED" }, include: { curingLogs: { include: { drum } } }, orderBy: { raisedAt: "asc" } }),
-    prisma.requisition.findMany({ where: { status: "DISPATCHED" }, include: { _count: { select: { curingLogs: true } } }, orderBy: { dispatchedAt: "desc" }, take: 20 }),
+    // By sent date, not by requisition: drums marked sent in the sheet have no requisition here.
+    prisma.curingLog.findMany({ where: { ...scope, sentDate: { not: null } }, include: { drum, requisition: { select: { id: true, reqNo: true } } }, orderBy: { sentDate: "desc" }, take: 20 }),
   ]);
 
   const buckets = settings.ageingBucketsHours;
@@ -36,7 +41,8 @@ export default async function TransfersPage({ searchParams }: { searchParams: Pr
   const bucketTone = (i: number): Tone => (i === 0 ? "green" : i === buckets.length ? "red" : "amber");
   const len = (r: { lengthM: unknown; drum: { lengthM: unknown } | null }) => Number(r.lengthM ?? r.drum?.lengthM ?? 0);
 
-  const ready = passed
+  const ready = passedAll
+    .filter(latest)
     .map((r) => {
       const passedAt = r.hotSetTests[0]?.testedAt ?? r.curingEndAt ?? r.createdAt;
       const age = hoursBetween(passedAt, now);
@@ -47,7 +53,7 @@ export default async function TransfersPage({ searchParams }: { searchParams: Pr
   const ageFilter = typeof sp.age === "string" && sp.age !== "" ? Number(sp.age) : null;
   const shown = ageFilter == null ? ready : ready.filter((r) => r.bucket === ageFilter);
   // A failed cycle that already has a re-cure after it is no longer the drum's latest result.
-  const onHold = failed.filter((r) => !r.drum?.curingLogs.some((c) => c.cycleNo > r.cycleNo));
+  const onHold = failed.filter(latest);
 
   const readyRows = shown.map((r) => (
     <tr key={r.id}>
@@ -61,6 +67,7 @@ export default async function TransfersPage({ searchParams }: { searchParams: Pr
       )}
       <td>{r.lotNo ?? "–"}</td>
       <td className="font-medium">{r.drumId ? <Link href={`/drums/${r.drumId}`} className="underline">{r.coreDrumNo}</Link> : r.coreDrumNo}</td>
+      <td><DrumInfo drum={r.drum ?? null} /></td>
       <td>{r.drum?.line.name ?? "–"}</td>
       <td className="text-right tabular-nums">{fmtM(len(r))}</td>
       <td className="whitespace-nowrap">{fmtDateTime(r.passedAt)}</td>
@@ -70,7 +77,7 @@ export default async function TransfersPage({ searchParams }: { searchParams: Pr
   const readyTable = (
     <Table>
       <thead>
-        <tr>{mayTransfer && <th>Send</th>}<th>Lot no</th><th>Drum no</th><th>Line</th><th className="text-right">Length</th><th>Passed at</th><th>Waiting since pass</th></tr>
+        <tr>{mayTransfer && <th>Send</th>}<th>Lot no</th><th>Drum no</th><th>Party / Item</th><th>Line</th><th className="text-right">Length</th><th>Passed at</th><th>Waiting since pass</th></tr>
       </thead>
       <tbody>{readyRows}</tbody>
     </Table>
@@ -110,13 +117,14 @@ export default async function TransfersPage({ searchParams }: { searchParams: Pr
       ) : (
         <Table>
           <thead>
-            <tr><th>Lot no</th><th>Drum no</th><th>Line</th><th className="text-right">Length</th><th>Status</th><th>Why it cannot be sent</th></tr>
+            <tr><th>Lot no</th><th>Drum no</th><th>Party / Item</th><th>Line</th><th className="text-right">Length</th><th>Status</th><th>Why it cannot be sent</th></tr>
           </thead>
           <tbody>
             {onHold.map((r) => (
               <tr key={r.id} title={HOLD_REASON}>
                 <td>{r.lotNo ?? "–"}</td>
                 <td className="font-medium">{r.drumId ? <Link href={`/drums/${r.drumId}`} className="underline">{r.coreDrumNo}</Link> : r.coreDrumNo}</td>
+                <td><DrumInfo drum={r.drum ?? null} /></td>
                 <td>{r.drum?.line.name ?? "–"}</td>
                 <td className="text-right tabular-nums">{fmtM(len(r))}</td>
                 <td><StatusChip status="FAILED" /></td>
@@ -161,21 +169,23 @@ export default async function TransfersPage({ searchParams }: { searchParams: Pr
       )}
 
       <h2 className="mt-8 mb-2 text-base font-semibold text-slate-900">Recently dispatched</h2>
-      {!dispatched.length ? (
+      {!sent.length ? (
         <EmptyState>Nothing dispatched yet.</EmptyState>
       ) : (
         <Table>
           <thead>
-            <tr><th>Requisition</th><th>Dispatched at</th><th className="text-right">Drums</th><th className="text-right">Total</th><th>Raised by</th></tr>
+            <tr><th>Sent on</th><th>Lot no</th><th>Drum no</th><th>Party / Item</th><th>Line</th><th className="text-right">Length</th><th>Requisition</th></tr>
           </thead>
           <tbody>
-            {dispatched.map((q) => (
-              <tr key={q.id}>
-                <td><Link href={`/transfers/${q.id}`} className="inline-flex min-h-11 items-center text-blue-700 underline">{q.reqNo}</Link></td>
-                <td className="whitespace-nowrap">{fmtDateTime(q.dispatchedAt)}</td>
-                <td className="text-right tabular-nums">{q._count.curingLogs}</td>
-                <td className="text-right tabular-nums">{fmtKm(q.totalLengthM)}</td>
-                <td>{q.raisedBy ?? "–"}</td>
+            {sent.map((r) => (
+              <tr key={r.id}>
+                <td className="whitespace-nowrap">{fmtDate(r.sentDate)}</td>
+                <td>{r.lotNo ?? "–"}</td>
+                <td className="font-medium">{r.drumId ? <Link href={`/drums/${r.drumId}`} className="underline">{r.coreDrumNo}</Link> : r.coreDrumNo}</td>
+                <td><DrumInfo drum={r.drum ?? null} /></td>
+                <td>{r.drum?.line.name ?? "–"}</td>
+                <td className="text-right tabular-nums">{fmtM(len(r))}</td>
+                <td>{r.requisition ? <Link href={`/transfers/${r.requisition.id}`} className="inline-flex min-h-11 items-center text-blue-700 underline">{r.requisition.reqNo}</Link> : "–"}</td>
               </tr>
             ))}
           </tbody>

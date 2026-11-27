@@ -39,6 +39,7 @@ export async function raiseRequisition(_: ActionState, fd: FormData): Promise<Ac
         });
         const note = await refreshStatuses(user.email);
         revalidatePath("/transfers");
+    revalidatePath("/"); // the home cards
         return `Requisition ${reqNo} raised for ${ids.length} drum${ids.length === 1 ? "" : "s"}.${note}`;
       } catch (e) {
         if (!isUniqueClash(e)) throw e; // someone took this number a moment ago: try the next one
@@ -67,6 +68,7 @@ export async function markDispatched(_: ActionState, fd: FormData): Promise<Acti
     });
     const note = await refreshStatuses(user.email);
     revalidatePath("/transfers");
+    revalidatePath("/"); // the home cards
     return `${reqNo} marked dispatched.${note}`;
   });
 }
@@ -85,6 +87,7 @@ export async function cancelRequisition(_: ActionState, fd: FormData): Promise<A
     });
     const note = await refreshStatuses(user.email);
     revalidatePath("/transfers");
+    revalidatePath("/"); // the home cards
     return `${reqNo} cancelled. Its drums are back in the ready list.${note}`;
   });
 }

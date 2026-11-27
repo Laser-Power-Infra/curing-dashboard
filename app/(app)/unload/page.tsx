@@ -2,7 +2,7 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { can, viewer } from "@/lib/auth";
 import { fmtDateOnly, fmtDateTime, fmtM, toIstInput } from "@/lib/format";
-import { Banner, Card, EmptyState, PageHeader, StatusChip, Table } from "@/components/ui";
+import { Banner, Card, DrumInfo, EmptyState, PageHeader, StatusChip, Table } from "@/components/ui";
 import { NewDrumForm, SetTimeForm } from "@/components/unload/forms";
 
 export default async function UnloadPage() {
@@ -12,9 +12,9 @@ export default async function UnloadPage() {
   const [lines, products, noTime, noTimeCount, recent] = await Promise.all([
     prisma.line.findMany({ where: { inScope: true, active: true }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
     prisma.product.findMany({ where: { active: true }, orderBy: { name: "asc" }, select: { name: true } }),
-    prisma.drum.findMany({ where: noTimeWhere, include: { line: true }, orderBy: [{ unloadDate: "desc" }, { createdAt: "desc" }], take: 50 }),
+    prisma.drum.findMany({ where: noTimeWhere, include: { line: true, product: { select: { code: true } } }, orderBy: [{ unloadDate: "desc" }, { createdAt: "desc" }], take: 50 }),
     prisma.drum.count({ where: noTimeWhere }),
-    prisma.drum.findMany({ where: { source: "MANUAL" }, include: { line: true }, orderBy: { createdAt: "desc" }, take: 20 }),
+    prisma.drum.findMany({ where: { source: "MANUAL" }, include: { line: true, product: { select: { code: true } } }, orderBy: { createdAt: "desc" }, take: 20 }),
   ]);
 
   return (
@@ -42,7 +42,8 @@ export default async function UnloadPage() {
                   <div className="text-sm">
                     <Link href={`/drums/${d.id}`} className="font-semibold text-blue-700 underline">Drum {d.drumNo}</Link>
                     <span className="text-slate-600"> · {d.line.name} · {fmtDateOnly(d.unloadDate)} · Grid ID {d.gridEntryId}</span>
-                    <div className="text-slate-600">{d.coreItem} · {fmtM(d.lengthM)}</div>
+                    <div className="text-slate-600">{fmtM(d.lengthM)}</div>
+                    <DrumInfo drum={d} />
                   </div>
                   {mayEdit && <SetTimeForm drumId={d.id} label={`Unload time on ${fmtDateOnly(d.unloadDate)} for drum ${d.drumNo}`} />}
                 </li>
@@ -58,7 +59,7 @@ export default async function UnloadPage() {
           ) : (
             <Table>
               <thead>
-                <tr><th>Grid ID</th><th>Drum no</th><th>Line</th><th>Unloaded</th><th>Core item</th><th>Length</th><th>Status</th><th>Entered by</th></tr>
+                <tr><th>Grid ID</th><th>Drum no</th><th>Line</th><th>Unloaded</th><th>Party / Item</th><th>Length</th><th>Status</th><th>Entered by</th></tr>
               </thead>
               <tbody>
                 {recent.map((d) => (
@@ -67,7 +68,7 @@ export default async function UnloadPage() {
                     <td>{d.drumNo}</td>
                     <td className="whitespace-nowrap">{d.line.name}</td>
                     <td className="whitespace-nowrap">{d.unloadedAt ? fmtDateTime(d.unloadedAt) : `${fmtDateOnly(d.unloadDate)} · time unknown`}</td>
-                    <td>{d.coreItem}</td>
+                    <td><DrumInfo drum={d} /></td>
                     <td className="whitespace-nowrap">{fmtM(d.lengthM)}</td>
                     <td><StatusChip status={d.status} /></td>
                     <td>{d.enteredBy ?? "–"}</td>

@@ -1,12 +1,65 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 @theme inline {
-  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  /* Devanagari falls through Inter to Noto Sans Devanagari, so Hindi and English share one look. */
+  --font-sans: var(--font-inter), var(--font-hindi), ui-sans-serif, system-ui, sans-serif;
+}
+
+:root {
+  color-scheme: light;
+  /* Text on a solid blue / red button. */
+  --on-solid: #fff;
+}
+
+/* Dark theme: the palette itself is swapped, so every page follows without a dark: class per element.
+   Neutrals lean blue (the brand hue); 50-200 are surfaces and borders, 600-900 are text. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --on-solid: #0b111b;
+  --color-white: #131a26;
+  --color-slate-50: #0b111b;
+  --color-slate-100: #1a2332;
+  --color-slate-200: #263143;
+  --color-slate-300: #36435a;
+  --color-slate-400: #5b6980;
+  --color-slate-500: #8391a7;
+  --color-slate-600: #a3afc2;
+  --color-slate-700: #c2ccda;
+  --color-slate-800: #dbe2ec;
+  --color-slate-900: #f1f4f9;
+  --color-red-50: #2a1416;
+  --color-red-200: #5c2428;
+  --color-red-300: #7a2e33;
+  --color-red-400: #a13a40;
+  --color-red-600: #ef5350;
+  --color-red-700: #ff7b72;
+  --color-red-800: #ffa198;
+  --color-red-900: #ffc9c2;
+  --color-amber-50: #2a2010;
+  --color-amber-200: #5a4416;
+  --color-amber-500: #f0a92b;
+  --color-amber-900: #ffd68a;
+  --color-amber-950: #ffe2ad;
+  --color-green-50: #0f2418;
+  --color-green-200: #1f4d31;
+  --color-green-300: #2a6541;
+  --color-green-600: #3fb968;
+  --color-green-700: #56d07f;
+  --color-green-800: #86e0a3;
+  --color-green-900: #b4efc6;
+  --color-blue-50: #121f38;
+  --color-blue-200: #26447a;
+  --color-blue-600: #5a9bff;
+  --color-blue-700: #7ab0ff;
+  --color-blue-800: #9cc4ff;
+  --color-blue-900: #c5dcff;
 }
 
 body {
-  background: #f8fafc;
-  color: #0f172a;
+  background: var(--color-slate-50);
+  color: var(--color-slate-900);
   /* numbers line up in tables and KPI tiles (guide 8) */
   font-variant-numeric: tabular-nums;
 }
@@ -36,4 +89,34 @@ body {
   tr[data-off] {
     display: none;
   }
+}
+
+/* Green tick that pops when an action is saved (FormMessage). */
+.tick {
+  display: inline-block;
+  animation: tick 0.5s ease-out;
+}
+@keyframes tick {
+  from {
+    transform: scale(0);
+  }
+  60% {
+    transform: scale(1.6);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tick {
+    animation: none;
+  }
+}
+
+/* The parts the browser draws: selection, caret, scrollbars. */
+::selection {
+  background: var(--color-blue-200);
+  color: var(--color-slate-900);
+}
+:root {
+  caret-color: var(--color-blue-700);
+  scrollbar-color: var(--color-slate-300) transparent;
+  scrollbar-width: thin;
 }
